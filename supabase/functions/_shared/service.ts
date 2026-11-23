@@ -48,6 +48,7 @@ export interface Store {
   upsertSession(userId: string, day: string, limitAtStart: number, tripped: boolean): Promise<void>;
   startPairing(code: string, tokenHash: string, ttlSeconds: number, maxPending: number): Promise<{ ok: boolean; reason: "collision" | "busy" | null }>;
   claimPairing(userId: string, code: string): Promise<{ ok: boolean; reason: "invalid_code" | "rate_limited" | null }>;
+  revokeDevice(userId: string, deviceId: string): Promise<boolean>;
   redeemPairing(tokenHash: string): Promise<{ status: "unknown" | "expired" | "pending" | "paired"; expires_at?: string; device_id?: string }>;
 }
 
@@ -160,6 +161,19 @@ export async function setLimit(ctx: Ctx, caller: Caller, value: unknown): Promis
     throw new ApiError(400, "bad_limit", "Limit must be a number between 1 and 1,000,000 USD.");
   }
   const before = await ctx.store.getLimits(caller.userId);
+  // Raising the limit is the one write that weakens the guard. From the glasses (device token,
+  // possibly by voice) it is refused while the account is CLOSING IN or TRIPPED, and refused if
+  // the state cannot be determined: that is exactly when someone would raise it to dodge the guard.
+  if (caller.via === "device" && before.daily_limit !== null && amount > Number(before.daily_limit)) {
+    const snap = await getSnapshot(ctx, caller);
+    if (snap.state === "CLOSING" || snap.state === "TRIPPED") {
+      await ctx.store.logAction({
+        user_id: caller.userId, device_id: caller.deviceId, kind: "set_limit", status: "rejected", reason: "raise_blocked",
+        detail: { from: before.daily_limit, to: amount, state: snap.state, via: caller.via },
+      }).catch(() => {});
+      throw new ApiError(403, "raise_blocked", "Raising the limit is blocked from the glasses while you are close to it or past it. Use the website.");
+    }
+  }
   await ctx.store.setLimit(caller.userId, amount);
   await ctx.store.logAction({
     user_id: caller.userId,
@@ -372,4 +386,12 @@ export async function pairClaim(store: Store, caller: Caller, code: unknown): Pr
   if (r.reason === "rate_limited") throw new ApiError(429, "rate_limited", "Too many wrong codes. Wait a few minutes and try again.");
   if (!r.ok) throw new ApiError(400, "invalid_code", "That code is wrong or has expired.");
   return { paired: true };
+}
+
+/** Removes a paired device (e.g. lost glasses). Website session only; the device token stops working at once. */
+export async function revokeDevice(store: Store, caller: Caller, deviceId: unknown): Promise<{ revoked: true }> {
+  if (caller.via !== "user") throw new ApiError(403, "forbidden", "Devices are removed from the website.");
+  if (typeof deviceId !== "string" || !UUID_RE.test(deviceId)) throw new ApiError(400, "bad_request", "Invalid device.");
+  if (!(await store.revokeDevice(caller.userId, deviceId))) throw new ApiError(404, "not_found", "No such device.");
+  return { revoked: true };
 }

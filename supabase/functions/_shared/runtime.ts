@@ -82,6 +82,10 @@ const store: Store = {
   async claimPairing(userId, code) {
     return check(await db().rpc("claim_pairing_code", { p_user: userId, p_code: code }));
   },
+  async revokeDevice(userId, deviceId) {
+    const rows = check(await db().from("devices").update({ revoked_at: new Date().toISOString() }).eq("id", deviceId).eq("user_id", userId).is("revoked_at", null).select("id"));
+    return (rows ?? []).length > 0;
+  },
   async redeemPairing(tokenHash) {
     return check(await db().rpc("redeem_pairing", { p_token_hash: tokenHash }));
   },

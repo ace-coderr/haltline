@@ -26,6 +26,7 @@ import {
   getSnapshot,
   pairClaim,
   pairStart,
+  revokeDevice,
   propose,
   setKillSwitch,
   setLimit,
@@ -96,8 +97,12 @@ export function makeHandlers(deps: Deps) {
           const caller = await authed(req);
           return jsonResponse({ ok: true, ...(await pairClaim(deps.store, caller, body.code)) });
         }
+        case "revoke": {
+          const caller = await authed(req);
+          return jsonResponse({ ok: true, ...(await revokeDevice(deps.store, caller, body.deviceId)) });
+        }
         default:
-          throw new ApiError(400, "bad_request", "action must be start, poll or claim.");
+          throw new ApiError(400, "bad_request", "action must be start, poll, claim or revoke.");
       }
     }),
 

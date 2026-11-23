@@ -86,6 +86,12 @@ function build(w: World, extra: Partial<Deps> = {}) {
       p.user = user;
       return { ok: true, reason: null };
     },
+    async revokeDevice(userId, deviceId) {
+      const hit = [...w.devices.entries()].find(([, d]) => d.id === deviceId && d.user_id === userId);
+      if (!hit) return false;
+      w.devices.delete(hit[0]);
+      return true;
+    },
     async redeemPairing(hash) {
       for (const p of w.pairing.values()) {
         if (p.hash !== hash) continue;
@@ -689,4 +695,57 @@ test("prices: public, labelled, shows age, and fails honestly when the source is
   w.exchangeError = new ExchangeError("prices_unavailable", "down");
   const down = await call(h.prices, req("GET"));
   assert.deepEqual([down.status, down.body!.error.code], [503, "prices_unavailable"]);
+});
+
+test("pairing: a website session can remove a paired device, which then stops working", async () => {
+  const w = newWorld();
+  const h = build(w);
+  const s = await call(h.pair, req("POST", { action: "start" }));
+  await call(h.pair, req("POST", { action: "claim", code: s.body!.code }, user));
+  await call(h.pair, req("POST", { action: "poll" }, { "x-device-token": s.body!.token }));
+  const token = { "x-device-token": s.body!.token };
+  assert.equal((await call(h.limits, req("GET", undefined, token))).status, 200);
+  const deviceId = [...w.devices.values()][0]!.id;
+  assert.equal((await call(h.pair, req("POST", { action: "revoke", deviceId }, device))).status, 403);
+  assert.equal((await call(h.pair, req("POST", { action: "revoke", deviceId: "nope" }, user))).status, 400);
+  assert.equal((await call(h.pair, req("POST", { action: "revoke", deviceId: "99999999-9999-4999-8999-999999999999" }, user))).status, 404);
+  assert.equal((await call(h.pair, req("POST", { action: "revoke", deviceId }, user))).body!.revoked, true);
+  assert.equal((await call(h.limits, req("GET", undefined, token))).status, 401);
+});
+
+test("limits: raising the limit from the glasses is blocked when CLOSING or TRIPPED, allowed when CALM, always allowed from the website", async () => {
+  const w = newWorld();
+  const h = build(w);
+  w.positions = [long(1, -10)];
+  // CALM: raising is fine
+  assert.equal((await call(h.limits, req("POST", { limit: 800 }, device))).status, 200);
+  // lowering is always fine, even when tripped
+  w.positions = [long(1, -900)];
+  assert.equal((await call(h.limits, req("POST", { limit: 700 }, device))).status, 200);
+  // TRIPPED (used 900 > 700): raising is refused and logged
+  const blocked = await call(h.limits, req("POST", { limit: 5000 }, device));
+  assert.deepEqual([blocked.status, blocked.body!.error.code], [403, "raise_blocked"]);
+  assert.equal(w.limits.daily_limit, 700);
+  assert.ok(w.logs.some((l) => l.status === "rejected" && l.reason === "raise_blocked"));
+  // CLOSING (80%+): also refused
+  w.positions = [long(1, -600)];
+  assert.equal((await call(h.limits, req("POST", { limit: 900 }, device))).body!.error.code, "raise_blocked");
+  // the website session may still raise it
+  assert.equal((await call(h.limits, req("POST", { limit: 5000 }, user))).status, 200);
+});
+
+test("limits: raising from the glasses fails closed when the state cannot be determined", async () => {
+  const w = newWorld();
+  const h = build(w);
+  w.exchangeError = new ExchangeError("prices_unavailable", "down");
+  const r = await call(h.limits, req("POST", { limit: 900 }, device));
+  assert.deepEqual([r.status, r.body!.error.code], [503, "prices_unavailable"]);
+  assert.equal(w.limits.daily_limit, 500);
+});
+
+test("limits: the first limit can be set from the glasses with no state check", async () => {
+  const w = newWorld();
+  w.limits.daily_limit = null;
+  w.exchangeError = new ExchangeError("prices_unavailable", "down");
+  assert.equal((await call(build(w).limits, req("POST", { limit: 300 }, device))).status, 200);
 });
