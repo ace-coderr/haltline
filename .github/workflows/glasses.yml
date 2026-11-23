@@ -1,0 +1,45 @@
+name: Build glasses app
+
+# Tests and packs the Even Hub app and uploads the .ehpk as a workflow artifact (for submission).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'glasses/**'
+      - '.github/workflows/glasses.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: glasses
+    env:
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: glasses/package-lock.json
+      - name: Check public configuration
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
+            echo "::error::Set the repository variables VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY."
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+      - run: npm run pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: haltline-ehpk
+          path: glasses/out.ehpk
+          if-no-files-found: error

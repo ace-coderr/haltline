@@ -1,0 +1,33 @@
+name: Keep backend awake
+
+# Supabase free projects pause after about 7 days without activity. This pings the health function
+# (which reads the database and the public price source) twice a day so the demo backend stays awake.
+# Note: GitHub disables scheduled workflows in a public repository after 60 days without repository activity.
+
+on:
+  schedule:
+    - cron: '17 */12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    env:
+      PUBLIC_URL: ${{ vars.VITE_SUPABASE_URL }}
+      PUBLIC_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+    steps:
+      - name: Ping health and prices
+        run: |
+          if [ -z "$PUBLIC_URL" ] || [ -z "$PUBLIC_KEY" ]; then echo "::error::Repository variables are not set."; exit 1; fi
+          ok=0
+          for i in 1 2 3 4; do
+            out=$(curl -fsS -m 30 "$PUBLIC_URL/functions/v1/health" -H "apikey: $PUBLIC_KEY" || true)
+            echo "health: $out"
+            if echo "$out" | grep -q '"db":"ok"'; then ok=1; break; fi
+            sleep 20
+          done
+          curl -fsS -m 30 -o /dev/null -w "prices: HTTP %{http_code}\n" "$PUBLIC_URL/functions/v1/prices" -H "apikey: $PUBLIC_KEY" || true
+          if [ "$ok" != "1" ]; then echo "::error::health did not report a working database"; exit 1; fi
