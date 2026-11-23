@@ -171,3 +171,23 @@ test("token hash and pairing code formats are enforced", async () => {
   await assert.rejects(db.query("insert into pairing_codes (code, token_hash, expires_at) values ('12345a', $1, now())", [HASH]));
   await db.query("insert into pairing_codes (code, token_hash, expires_at) values ('123456', $1, now() + interval '10 minutes')", [HASH]);
 });
+
+test("the service role can use every table and the API roles keep only their narrow grants", async () => {
+  await db.exec("set role service_role");
+  try {
+    for (const t of ["limits", "devices", "pairing_codes", "pairing_attempts", "sessions", "proposals", "actions_log", "paper_prices", "paper_accounts", "paper_positions", "paper_fills"]) {
+      await db.query(`select * from ${t} limit 1`);
+    }
+    await db.query("insert into pairing_attempts (user_id, succeeded) values (null, false)"); // identity sequence
+  } finally {
+    await db.exec("reset role");
+  }
+  // nothing was widened for clients: they still cannot write or read server-only tables
+  await db.exec("set role authenticated");
+  try {
+    await assert.rejects(db.query("select * from proposals"), Error);
+    await assert.rejects(db.query("insert into limits (user_id) values ('11111111-1111-1111-1111-111111111111')"), Error);
+  } finally {
+    await db.exec("reset role");
+  }
+});

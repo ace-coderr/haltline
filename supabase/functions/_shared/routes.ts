@@ -51,10 +51,13 @@ export function makeHandlers(deps: Deps) {
     /** Public. Wakes the database and checks the exchange, so a scheduled ping keeps both warm. */
     health: route(["GET"], async (_req) => {
       let db: "ok" | "error" = "ok";
+      let dbCode: string | undefined;
       try {
         await deps.store.ping();
-      } catch {
+      } catch (e) {
         db = "error";
+        const c = (e as { code?: unknown }).code;
+        dbCode = e instanceof ApiError ? e.code : typeof c === "string" && /^[A-Za-z0-9_]{1,16}$/.test(c) ? c : "unknown";
       }
       let prices: string = "ok";
       let priceAgeMs: number | null = null;
@@ -68,6 +71,7 @@ export function makeHandlers(deps: Deps) {
         time: new Date(deps.now()).toISOString(),
         region: deps.region() ?? null,
         db,
+        ...(dbCode ? { dbCode } : {}),
         priceSource: { name: "Bitstamp public ticker", status: prices, ageMs: priceAgeMs },
         voice: deps.groqKey() ? "configured" : "not_configured",
       });

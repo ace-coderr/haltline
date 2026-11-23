@@ -9,15 +9,13 @@ export const USER_B = "22222222-2222-2222-2222-222222222222";
 export async function createDb(): Promise<PGlite> {
   const db = new PGlite();
   await db.exec(`
-    create role anon nologin; create role authenticated nologin; create role service_role nologin;
+    create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;
     create schema auth;
     create table auth.users (id uuid primary key);
     create function auth.uid() returns uuid language sql stable
       as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
     grant usage on schema public, auth to anon, authenticated, service_role;
     grant execute on function auth.uid() to anon, authenticated, service_role;
-    -- mimic Supabase defaults: new public tables are granted to the API roles
-    alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
     insert into auth.users values ('${USER_A}'), ('${USER_B}');
   `);
   const dir = new URL("../migrations/", import.meta.url);

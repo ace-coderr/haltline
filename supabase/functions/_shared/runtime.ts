@@ -25,8 +25,18 @@ function adminClient() {
 let admin: ReturnType<typeof adminClient> | null = null;
 const db = () => (admin ??= adminClient());
 
-function check<T>(res: { data: T; error: { message: string } | null }): T {
-  if (res.error) throw new Error(`database: ${res.error.message}`);
+/** A database failure. `code` is the short PostgREST/Postgres code only; it is safe to expose on /health. */
+export class DbError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "DbError";
+    this.code = code;
+  }
+}
+
+function check<T>(res: { data: T; error: { message: string; code?: string } | null }): T {
+  if (res.error) throw new DbError(res.error.code ?? "unknown", `database: ${res.error.message}`);
   return res.data;
 }
 
