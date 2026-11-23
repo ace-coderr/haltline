@@ -164,15 +164,15 @@ function Steps() {
     <Section id="steps" kicker="How it works" title="Four steps">
       <ol className="steps">
         {STEPS.map((s, i) => (
-          <Reveal key={s.n} delay={i * 80}>
-            <li>
+          <li key={s.n}>
+            <Reveal delay={i * 80}>
               <Link to={s.to} className="step card">
                 <span className="step-n mono">{s.n}</span>
                 <h3>{s.title}</h3>
                 <p className="muted">{s.body}</p>
               </Link>
-            </li>
-          </Reveal>
+            </Reveal>
+          </li>
         ))}
       </ol>
     </Section>

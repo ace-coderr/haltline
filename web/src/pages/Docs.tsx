@@ -93,7 +93,7 @@ export default function Docs() {
         <Reveal>
           <div className="card">
             <p className="muted small">Base URL: <code className="mono">{base}</code>. Send the public project key as the <code className="mono">apikey</code> header.</p>
-            <div className="table-wrap">
+            <div className="table-wrap" tabIndex={0} role="region" aria-label="Endpoints table, scrollable">
               <table className="table">
                 <thead><tr><th>Function</th><th>Method</th><th>Auth</th><th>What it does</th></tr></thead>
                 <tbody>
@@ -130,9 +130,9 @@ export default function Docs() {
         <Reveal>
           <div className="card code-card">
             <p className="muted small">Public price feed (no sign-in):</p>
-            <pre className="code"><code>{`curl "${base}/prices" -H "apikey: $HALTLINE_PUBLIC_KEY"`}</code></pre>
+            <pre className="code" tabIndex={0} aria-label="Code example"><code>{`curl "${base}/prices" -H "apikey: $HALTLINE_PUBLIC_KEY"`}</code></pre>
             <p className="muted small">A cut, as the glasses do it (two steps):</p>
-            <pre className="code"><code>{`curl -X POST "${base}/act" -H "apikey: $HALTLINE_PUBLIC_KEY" \\
+            <pre className="code" tabIndex={0} aria-label="Code example"><code>{`curl -X POST "${base}/act" -H "apikey: $HALTLINE_PUBLIC_KEY" \\
   -H "x-device-token: $DEVICE_TOKEN" -H "Content-Type: application/json" \\
   -d '{"action":"propose","kind":"cut_half"}'
 # wait at least a second, then within 20 s:
@@ -153,7 +153,7 @@ curl -X POST "${base}/act" ... -d '{"action":"confirm","proposalId":"<id>","kind
       <Section kicker="Errors" title="What you may see">
         <Reveal>
           <div className="card">
-            <div className="table-wrap">
+            <div className="table-wrap" tabIndex={0} role="region" aria-label="Error codes table, scrollable">
               <table className="table">
                 <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
                 <tbody>

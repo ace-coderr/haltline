@@ -68,7 +68,7 @@ export function Footer() {
           <p className="muted small">Know how close you are to your own daily loss limit, without picking up a phone.</p>
         </div>
         <div>
-          <h3>Product</h3>
+          <h2>Product</h2>
           <ul>
             <li><Link to="/how-it-works">How it works</Link></li>
             <li><Link to="/limits">Limits</Link></li>
@@ -78,7 +78,7 @@ export function Footer() {
           </ul>
         </div>
         <div>
-          <h3>Trust</h3>
+          <h2>Trust</h2>
           <ul>
             <li><Link to="/safety">Safety rules</Link></li>
             <li><Link to="/docs">Docs and API</Link></li>
@@ -86,7 +86,7 @@ export function Footer() {
           </ul>
         </div>
         <div className="footer-note">
-          <h3>Read this</h3>
+          <h2>Read this</h2>
           <p className="small">
             <strong>Paper trading only.</strong> The account is simulated and priced from public market data. No real funds are held, nothing
             here is financial advice, and no order ever reaches a real exchange.

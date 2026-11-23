@@ -222,7 +222,7 @@ ul, ol { margin: 0; padding: 0; }
 .footer-grid { display: grid; grid-template-columns: 1.2fr 0.7fr 0.7fr 1.4fr; gap: 28px; }
 @media (max-width: 860px) { .footer-grid { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 520px) { .footer-grid { grid-template-columns: 1fr; } }
-.footer h3 { font: 700 0.78rem var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.footer h2 { font: 700 0.78rem var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
 .footer ul { list-style: none; display: grid; gap: 8px; }
 .footer a { color: var(--text); }
 .footer a:hover { color: var(--g); }

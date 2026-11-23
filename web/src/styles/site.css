@@ -83,7 +83,7 @@
 .how-step { padding: clamp(28px, 5vw, 56px) 0; border-top: 1px solid var(--line); }
 .how-row { display: grid; grid-template-columns: 0.9fr 1.1fr; gap: clamp(20px, 4vw, 56px); align-items: center; }
 @media (max-width: 860px) { .how-row { grid-template-columns: 1fr; } }
-.how-copy .step-n { font-size: 3rem; opacity: 0.35; display: block; line-height: 1; }
+.how-copy .step-n { font-size: 3rem; color: var(--g-2); display: block; line-height: 1; }
 .how-shots { display: grid; gap: 14px; }
 .shots-2, .shots-3 { grid-template-columns: repeat(2, 1fr); }
 .shots-3 .shot:first-child { grid-column: 1 / -1; }
@@ -96,3 +96,16 @@
 .code { background: #070a08; border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 14px 16px; overflow-x: auto; margin: 6px 0 16px; font: 500 0.85rem/1.55 var(--mono); color: #c9f5da; }
 .code-card code, .card code { font-family: var(--mono); font-size: 0.88em; color: #c9f5da; }
 q { color: var(--g); }
+
+/* ---------- narrow screens (320px and up) ---------- */
+.hero-grid > *, .two-col > *, .how-row > *, .stats > *, .module-grid > *, .rules-grid > * { min-width: 0; }
+.hero h1, .stat-value, .card code, .kv dd { overflow-wrap: anywhere; }
+.ticker-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.2fr) auto; }
+@media (max-width: 400px) {
+  .stats { grid-template-columns: 1fr; }
+  .stat-value { font-size: 1.25rem; }
+  .hero h1 { font-size: 2rem; }
+  .ticker-row { font-size: 0.82rem; gap: 6px; }
+  .kv { grid-template-columns: 1fr; }
+  .code { font-size: 0.78rem; }
+}
