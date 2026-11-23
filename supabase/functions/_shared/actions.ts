@@ -18,7 +18,7 @@ export type Side = "Buy" | "Sell";
 
 export interface Position {
   symbol: string;
-  /** "Buy" = long, "Sell" = short (Bybit naming). */
+  /** "Buy" = long, "Sell" = short (exchange convention). */
   side: Side;
   /** Always positive. */
   size: number;

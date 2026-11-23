@@ -3,9 +3,8 @@
 
 import { ApiError } from "./api.ts";
 import type { Caller } from "./api.ts";
-import { type ActionKind, isActionKind, type Instrument, planReduction, type PlannedOrder, type Position } from "./actions.ts";
-import { BybitError } from "./bybit.ts";
-import type { OpenPosition, OrderResult } from "./bybit.ts";
+import { type ActionKind, type Instrument, isActionKind, planReduction, type PlannedOrder, type Position } from "./actions.ts";
+import { type ExchangeAdapter, ExchangeError, type OpenPosition } from "./exchange.ts";
 import { checkCooldown, COOLDOWN_MS, MIN_CONFIRM_DELAY_MS, PROPOSAL_TTL_MS } from "./cooldown.ts";
 import { computeRisk, type RiskState, utcDayStart, validateLimit } from "./limits.ts";
 
@@ -52,37 +51,29 @@ export interface Store {
   redeemPairing(tokenHash: string): Promise<{ status: "unknown" | "expired" | "pending" | "paired"; expires_at?: string; device_id?: string }>;
 }
 
-export interface Exchange {
-  serverTimeMs(): Promise<number>;
-  getPositions(): Promise<OpenPosition[]>;
-  getClosedPnl(startMs: number, endMs: number): Promise<number>;
-  getInstrument(symbol: string): Promise<Instrument & { status: string }>;
-  placeReduceOnlyMarket(order: PlannedOrder, orderLinkId: string): Promise<OrderResult>;
-}
-
 export interface Ctx {
   store: Store;
-  exchange: () => Exchange;
+  exchange: () => ExchangeAdapter;
   now: () => number;
 }
 
-/** Maps exchange failures to API errors the clients can show honestly. */
+/** Maps exchange/price failures to API errors the clients can show honestly. */
 export function exchangeFailure(e: unknown): ApiError {
   if (e instanceof ApiError) return e;
-  if (e instanceof BybitError) {
-    const map: Record<string, [number, string, string]> = {
-      region_blocked: [503, "exchange_region_blocked", "The exchange blocked this server's region."],
-      rate_limited: [503, "exchange_rate_limited", "The exchange is rate limiting requests. Try again shortly."],
-      auth: [503, "exchange_auth", "The exchange rejected the server's API key."],
-      clock: [503, "exchange_clock", "Server clock is out of sync with the exchange."],
-      network: [503, "exchange_unreachable", "Could not reach the exchange."],
-      bad_response: [502, "exchange_bad_response", "The exchange sent an unexpected response."],
-      exchange: [502, "exchange_rejected", "The exchange rejected the request."],
-    };
-    const [status, code, message] = map[e.kind] ?? [502, "exchange_error", "Exchange error."];
-    return new ApiError(status, code, message, e.retCode !== null ? { retCode: e.retCode } : {});
+  if (e instanceof ExchangeError) {
+    switch (e.kind) {
+      case "prices_stale":
+        return new ApiError(503, "prices_stale", "Live prices are too old to use right now. Nothing was changed.");
+      case "prices_unavailable":
+        return new ApiError(503, "prices_unavailable", "The live price source is unavailable. Nothing was changed.");
+      case "rejected":
+        return new ApiError(409, e.reason ?? "rejected", e.message);
+      case "unsupported_symbol":
+      case "bad_request":
+        return new ApiError(400, e.kind, e.message);
+    }
   }
-  return new ApiError(503, "exchange_unavailable", "The exchange is unavailable.");
+  return new ApiError(503, "exchange_unavailable", "The paper exchange is unavailable.");
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +103,7 @@ export async function getSnapshot(ctx: Ctx, caller: Caller): Promise<Snapshot> {
   let realized: number;
   try {
     const ex = ctx.exchange();
-    [positions, realized] = await Promise.all([ex.getPositions(), ex.getClosedPnl(utcDayStart(nowMs), nowMs + 60_000)]);
+    [positions, realized] = await Promise.all([ex.getPositions(caller.userId), ex.getRealizedSince(caller.userId, utcDayStart(nowMs))]);
   } catch (e) {
     throw exchangeFailure(e);
   }
@@ -220,13 +211,13 @@ export async function propose(ctx: Ctx, caller: Caller, kindRaw: unknown): Promi
   const instruments: Record<string, Instrument | undefined> = {};
   try {
     const ex = ctx.exchange();
-    positions = await ex.getPositions();
+    positions = await ex.getPositions(caller.userId);
     for (const sym of new Set(positions.map((p) => p.symbol))) {
       try {
         const inst = await ex.getInstrument(sym);
         if (inst.status === "Trading") instruments[sym] = { qtyStep: inst.qtyStep, minOrderQty: inst.minOrderQty };
       } catch (e) {
-        if (!(e instanceof BybitError && e.kind === "bad_response")) throw e;
+        if (!(e instanceof ExchangeError && e.kind === "unsupported_symbol")) throw e;
       }
     }
   } catch (e) {
@@ -297,18 +288,18 @@ export async function confirm(ctx: Ctx, caller: Caller, proposalId: unknown, kin
 
   // 3) place reduce-only orders, one by one, logging each leg
   const results: ConfirmResult["results"] = [];
-  let ex: Exchange | null = null;
+  let ex: ExchangeAdapter | null = null;
   try {
     ex = ctx.exchange();
   } catch (e) {
-    // exchange not configured/blocked: nothing was placed, give the slot back
+    // exchange unavailable: nothing was placed, give the slot back
     await ctx.store.releaseSlot(caller.userId, claim.claimed_at!, claim.previous).catch(() => {});
     throw exchangeFailure(e);
   }
   for (let i = 0; i < consumed.orders.length; i++) {
     const order = consumed.orders[i]!;
     try {
-      const r = await ex.placeReduceOnlyMarket(order, `hl-${proposalId.slice(0, 8)}-${i}`);
+      const r = await ex.placeReduceOnlyMarket(caller.userId, order, `hl-${proposalId.slice(0, 8)}-${i}`);
       results.push({ symbol: order.symbol, qty: order.qty, status: "executed", orderId: r.orderId });
       await ctx.store.logAction({
         user_id: caller.userId, device_id: caller.deviceId, proposal_id: proposalId, kind, status: "executed",

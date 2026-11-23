@@ -3,10 +3,12 @@
 // type-checked with `deno check` instead. All logic lives in the injected-dependency modules.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { ApiError } from "./api.ts";
-import { createBybitClient } from "./bybit.ts";
-import { TestnetGuardError } from "./guard.ts";
+import { createPaperExchange } from "./paper.ts";
+import type { PaperStore } from "./paper.ts";
+import { createPriceFeed } from "./prices.ts";
+import type { PriceStore, Quote } from "./prices.ts";
 import { makeHandlers } from "./routes.ts";
-import type { Exchange, Store } from "./service.ts";
+import type { Store } from "./service.ts";
 
 const env = (name: string): string | undefined => {
   const v = Deno.env.get(name);
@@ -75,61 +77,56 @@ const store: Store = {
   },
 };
 
-// Short memo so a burst of glasses refreshes cannot exhaust the exchange rate limit.
-function memo<T>(ttlMs: number, fn: () => Promise<T>): () => Promise<T> {
-  let at = 0;
-  let value: Promise<T> | null = null;
-  return () => {
-    const now = Date.now();
-    if (!value || now - at > ttlMs) {
-      at = now;
-      value = fn().catch((e) => {
-        value = null;
-        throw e;
-      });
-    }
-    return value;
-  };
-}
+const num = (v: unknown): number => Number(v);
 
-let exchangeCache: { fingerprint: string; ex: Exchange } | null = null;
+const paperStore: PaperStore = {
+  async getPositions(userId) {
+    const rows = check(await db().from("paper_positions").select("symbol,side,size,entry_price").eq("user_id", userId));
+    return (rows ?? []).map((r) => ({ symbol: r.symbol, side: r.side, size: num(r.size), entry_price: num(r.entry_price) }));
+  },
+  async getAccount(userId) {
+    const r = check(await db().from("paper_accounts").select("balance,starting_balance").eq("user_id", userId).maybeSingle());
+    return r ? { balance: num(r.balance), starting_balance: num(r.starting_balance) } : null;
+  },
+  async applyFill(a) {
+    return check(await db().rpc("paper_apply_fill", {
+      p_user: a.userId, p_symbol: a.symbol, p_side: a.side, p_qty: a.qty, p_price: a.price, p_fee_rate: a.feeRate,
+      p_reduce_only: a.reduceOnly, p_link_id: a.linkId, p_source: a.source, p_max_leverage: a.maxLeverage,
+      p_marks: a.marks, p_starting_balance: a.startingBalance,
+    }));
+  },
+  async realizedSince(userId, sinceIso) {
+    return num(check(await db().rpc("paper_realized_since", { p_user: userId, p_since: sinceIso })));
+  },
+  async listFills(userId, limit) {
+    const rows = check(await db().from("paper_fills").select("id,symbol,side,qty,price,fee,realized_pnl,reduce_only,source,created_at")
+      .eq("user_id", userId).order("created_at", { ascending: false }).limit(limit));
+    return rows ?? [];
+  },
+  async reset(userId, startingBalance) {
+    return check(await db().rpc("paper_reset", { p_user: userId, p_starting_balance: startingBalance }));
+  },
+};
 
-function exchange(): Exchange {
-  const baseUrl = env("EXCHANGE_BASE_URL");
-  const apiKey = env("BYBIT_API_KEY");
-  const apiSecret = env("BYBIT_API_SECRET");
-  if (!baseUrl || !apiKey || !apiSecret) {
-    throw new ApiError(503, "exchange_not_configured", "The exchange connection is not configured.");
-  }
-  const fingerprint = `${baseUrl}|${apiKey.length}|${apiSecret.length}`;
-  if (exchangeCache?.fingerprint === fingerprint) return exchangeCache.ex;
-  let client;
-  try {
-    client = createBybitClient({ baseUrl, apiKey, apiSecret });
-  } catch (e) {
-    if (e instanceof TestnetGuardError) {
-      throw new ApiError(503, "exchange_misconfigured", "Refusing to start: the exchange URL is not the testnet.");
-    }
-    throw e;
-  }
-  const positions = memo(2000, () => client.getPositions());
-  const closed = new Map<string, ReturnType<typeof memo<number>>>();
-  const ex: Exchange = {
-    serverTimeMs: () => client.serverTimeMs(),
-    getPositions: positions,
-    getClosedPnl: (start, end) => {
-      const key = String(start);
-      if (!closed.has(key)) closed.clear(); // one UTC day at a time
-      const m = closed.get(key) ?? memo(2000, () => client.getClosedPnl(start, end));
-      closed.set(key, m);
-      return m();
-    },
-    getInstrument: (s) => client.getInstrument(s),
-    placeReduceOnlyMarket: (o, id) => client.placeReduceOnlyMarket(o, id),
-  };
-  exchangeCache = { fingerprint, ex };
-  return ex;
-}
+const priceStore: PriceStore = {
+  async readQuotes() {
+    const rows = check(await db().from("paper_prices").select("symbol,bid,ask,last,source_ts,fetched_at"));
+    return (rows ?? []).map((r): Quote => ({
+      symbol: r.symbol, bid: num(r.bid), ask: num(r.ask), last: num(r.last),
+      sourceTs: Date.parse(r.source_ts), fetchedAt: Date.parse(r.fetched_at),
+    }));
+  },
+  async writeQuotes(quotes) {
+    check(await db().from("paper_prices").upsert(quotes.map((q) => ({
+      symbol: q.symbol, bid: q.bid, ask: q.ask, last: q.last, source_ts: new Date(q.sourceTs).toISOString(),
+      fetched_at: new Date(q.fetchedAt).toISOString(), source: "bitstamp",
+    }))));
+  },
+};
+
+const now = () => Date.now();
+const prices = createPriceFeed({ store: priceStore, now });
+const paper = createPaperExchange({ store: paperStore, prices, now });
 
 async function verifyJwt(jwt: string): Promise<{ userId: string } | null> {
   const url = env("SUPABASE_URL");
@@ -142,8 +139,10 @@ async function verifyJwt(jwt: string): Promise<{ userId: string } | null> {
 
 export const handlers = makeHandlers({
   store,
-  exchange,
-  now: () => Date.now(),
+  exchange: () => paper.adapter,
+  paper: paper.panel,
+  prices,
+  now,
   groqKey: () => env("GROQ_API_KEY"),
   region: () => env("SB_REGION") ?? env("DENO_REGION"),
   findDeviceByHash: async (hash) =>

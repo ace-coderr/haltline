@@ -35,7 +35,7 @@ test("migration applies and creates all tables", async () => {
   );
   assert.deepEqual(
     t.map((r) => r.tablename),
-    ["actions_log", "devices", "limits", "pairing_attempts", "pairing_codes", "proposals", "sessions"],
+    ["actions_log", "devices", "limits", "pairing_attempts", "pairing_codes", "paper_accounts", "paper_fills", "paper_positions", "paper_prices", "proposals", "sessions"],
   );
 });
 

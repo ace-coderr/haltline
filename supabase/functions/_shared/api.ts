@@ -27,8 +27,12 @@ export const CORS_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
 };
 
+/** Every JSON object response carries mode: "PAPER". The account is simulated, always. */
+export const MODE_LABEL = "PAPER";
+
 export function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
+  const labelled = typeof body === "object" && body !== null && !Array.isArray(body) ? { mode: MODE_LABEL, ...body } : body;
+  return new Response(JSON.stringify(labelled), {
     status,
     headers: { ...CORS_HEADERS, "Content-Type": "application/json; charset=utf-8" },
   });

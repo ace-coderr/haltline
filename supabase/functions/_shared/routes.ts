@@ -12,12 +12,17 @@ import {
   sha256Hex,
   WindowLimiter,
 } from "./api.ts";
-import { BybitError } from "./bybit.ts";
+import { ExchangeError } from "./exchange.ts";
+import { INSTRUMENTS, MODEL } from "./instruments.ts";
+import type { PaperExchange } from "./paper.ts";
+import { type PriceFeed, quoteAge } from "./prices.ts";
 import { GroqError, MAX_AUDIO_BYTES, transcribe } from "./groq.ts";
 import { parseVoiceCommand } from "./voice.ts";
+import { utcDayStart } from "./limits.ts";
 import {
   confirm,
   type Ctx,
+  exchangeFailure,
   getSnapshot,
   pairClaim,
   pairStart,
@@ -27,6 +32,8 @@ import {
 } from "./service.ts";
 
 export interface Deps extends Ctx, AuthDeps {
+  paper: PaperExchange["panel"];
+  prices: PriceFeed;
   groqKey: () => string | undefined;
   region: () => string | undefined;
   fetchFn?: typeof fetch;
@@ -36,6 +43,8 @@ export interface Deps extends Ctx, AuthDeps {
 export function makeHandlers(deps: Deps) {
   const transcribeLimiter = new WindowLimiter(10, 60_000);
   const pairStartLimiter = new WindowLimiter(20, 60_000);
+  const pricesLimiter = new WindowLimiter(120, 60_000);
+  const paperLimiter = new WindowLimiter(30, 60_000);
   const authed = (req: Request) => authenticate(req, deps);
 
   return {
@@ -47,18 +56,19 @@ export function makeHandlers(deps: Deps) {
       } catch {
         db = "error";
       }
-      let exchange: string = "ok";
+      let prices: string = "ok";
+      let priceAgeMs: number | null = null;
       try {
-        await deps.exchange().serverTimeMs();
+        priceAgeMs = (await deps.exchange().health()).priceAgeMs;
       } catch (e) {
-        exchange = e instanceof BybitError ? e.kind : e instanceof ApiError ? e.code : "error";
+        prices = e instanceof ExchangeError ? e.kind : e instanceof ApiError ? e.code : "error";
       }
       return jsonResponse({
-        ok: db === "ok" && exchange === "ok",
+        ok: db === "ok" && prices === "ok",
         time: new Date(deps.now()).toISOString(),
         region: deps.region() ?? null,
         db,
-        exchange,
+        priceSource: { name: "Bitstamp public ticker", status: prices, ageMs: priceAgeMs },
         voice: deps.groqKey() ? "configured" : "not_configured",
       });
     }),
@@ -114,6 +124,61 @@ export function makeHandlers(deps: Deps) {
         return jsonResponse({ ok: true, ...(await confirm(deps, caller, body.proposalId, body.kind)) });
       }
       throw new ApiError(400, "bad_request", "action must be propose or confirm.");
+    }),
+
+    /** Public, cached live prices for the website. Also keeps the price cache warm. */
+    prices: route(["GET"], async (_req) => {
+      const wait = pricesLimiter.check("global", deps.now());
+      if (wait > 0) throw new ApiError(429, "rate_limited", "Too many requests.", { retryAfterMs: wait });
+      let quotes;
+      try {
+        quotes = await deps.prices.getQuotes();
+      } catch (e) {
+        throw exchangeFailure(e);
+      }
+      const now = deps.now();
+      return jsonResponse({
+        ok: true,
+        source: MODEL.priceSource,
+        quotes: INSTRUMENTS.map((i) => {
+          const q = quotes.get(i.symbol)!;
+          return { symbol: i.symbol, base: i.base, bid: q.bid, ask: q.ask, last: q.last, ageMs: quoteAge(q, now) };
+        }),
+      });
+    }),
+
+    /** The paper account: view it, open and close positions, reset. Writes are website-only. */
+    paper: route(["GET", "POST"], async (req) => {
+      const caller = await authed(req);
+      if (req.method === "GET") {
+        try {
+          return jsonResponse({ ok: true, ...(await deps.paper.accountView(caller.userId, utcDayStart(deps.now()))) });
+        } catch (e) {
+          throw exchangeFailure(e);
+        }
+      }
+      if (caller.via !== "user") throw new ApiError(403, "forbidden", "Paper trades are placed from the website.");
+      const wait = paperLimiter.check(caller.userId, deps.now());
+      if (wait > 0) throw new ApiError(429, "rate_limited", "Slow down.", { retryAfterMs: wait });
+      const body = await readJsonObject(req);
+      const clientId = typeof body.clientId === "string" && /^[A-Za-z0-9_-]{8,32}$/.test(body.clientId) ? `web-${body.clientId}` : null;
+      try {
+        if (body.action === "open") {
+          if (!clientId) throw new ApiError(400, "bad_request", "clientId (8-32 letters, digits, - or _) is required.");
+          return jsonResponse({ ok: true, ...(await deps.paper.open(caller.userId, body.symbol, body.side, body.size, clientId)) });
+        }
+        if (body.action === "close") {
+          if (!clientId) throw new ApiError(400, "bad_request", "clientId (8-32 letters, digits, - or _) is required.");
+          return jsonResponse({ ok: true, ...(await deps.paper.close(caller.userId, body.symbol, body.size, clientId)) });
+        }
+        if (body.action === "reset") {
+          await deps.paper.reset(caller.userId);
+          return jsonResponse({ ok: true, reset: true });
+        }
+      } catch (e) {
+        throw exchangeFailure(e);
+      }
+      throw new ApiError(400, "bad_request", "action must be open, close or reset.");
     }),
 
     /** Audio in, transcript and parsed command out. Never writes anything itself. */

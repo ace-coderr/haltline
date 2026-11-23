@@ -1,6 +1,8 @@
 // Groq Whisper transcription (free tier: about 20 requests/min, 2,000/day, no SLA).
 // Endpoint, model ids, form fields, 25 MB free-tier file limit and the retry-after header
 // follow the Groq speech-to-text and rate-limit docs read on 2026-11-23.
+import { assertOutboundAllowed } from "./guard.ts";
+
 // Failures are surfaced as typed errors so the glasses can show a visible failure state
 // and fall back to gestures.
 
@@ -49,6 +51,7 @@ export async function transcribe(audio: Uint8Array, contentType: string, opts: T
   if (audio.byteLength === 0) throw new GroqError("bad_audio", "empty audio");
   if (audio.byteLength > MAX_AUDIO_BYTES) throw new GroqError("bad_audio", "audio is too large");
 
+  assertOutboundAllowed("POST", GROQ_URL);
   const fetchFn = opts.fetchFn ?? fetch;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const maxWaitMs = opts.maxWaitMs ?? 3000;

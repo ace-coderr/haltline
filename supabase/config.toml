@@ -19,3 +19,9 @@ verify_jwt = false
 
 [functions.transcribe]
 verify_jwt = false
+
+[functions.paper]
+verify_jwt = false
+
+[functions.prices]
+verify_jwt = false

@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeHandlers, type Deps } from "./routes.ts";
 import { sha256Hex } from "./api.ts";
-import { BybitError, type OpenPosition } from "./bybit.ts";
+import { type ExchangeAdapter, ExchangeError, type OpenPosition } from "./exchange.ts";
 import type { PlannedOrder } from "./actions.ts";
-import type { ActionLogRow, ClaimResult, Exchange, LimitsRow, Store } from "./service.ts";
+import type { ActionLogRow, ClaimResult, LimitsRow, Store } from "./service.ts";
 
 const USER = "11111111-1111-1111-1111-111111111111";
 const TOKEN = "t".repeat(43);
@@ -26,6 +26,8 @@ interface World {
   placeError: ((o: PlannedOrder) => Error | null) | null;
   exchangeError: Error | null;
   dbDown: boolean;
+  panelCalls: Record<string, unknown>[];
+  panelError: Error | null;
 }
 
 function newWorld(): World {
@@ -33,7 +35,7 @@ function newWorld(): World {
     clock: Date.UTC(2026, 10, 23, 12, 0, 0),
     limits: { daily_limit: 500, kill_switch: false, last_action_at: null },
     logs: [], proposals: new Map(), pairing: new Map(), devices: new Map(), sessions: [],
-    claimResult: "real", positions: [], realized: 0, placed: [], placeError: null, exchangeError: null, dbDown: false,
+    claimResult: "real", positions: [], realized: 0, placed: [], placeError: null, exchangeError: null, dbDown: false, panelCalls: [], panelError: null,
   };
 }
 
@@ -94,12 +96,13 @@ function build(w: World, extra: Partial<Deps> = {}) {
     },
   };
 
-  const exchange: Exchange = {
-    async serverTimeMs() { if (w.exchangeError) throw w.exchangeError; return w.clock; },
+  const exchange: ExchangeAdapter = {
+    mode: "PAPER",
+    async health() { if (w.exchangeError) throw w.exchangeError; return { priceAgeMs: 1200 }; },
     async getPositions() { if (w.exchangeError) throw w.exchangeError; return w.positions; },
-    async getClosedPnl() { if (w.exchangeError) throw w.exchangeError; return w.realized; },
+    async getRealizedSince() { if (w.exchangeError) throw w.exchangeError; return w.realized; },
     async getInstrument() { return { qtyStep: 0.001, minOrderQty: 0.001, status: "Trading" }; },
-    async placeReduceOnlyMarket(order, linkId) {
+    async placeReduceOnlyMarket(_userId, order, linkId) {
       const err = w.placeError?.(order);
       if (err) throw err;
       w.placed.push({ order, linkId });
@@ -107,9 +110,36 @@ function build(w: World, extra: Partial<Deps> = {}) {
     },
   };
 
+  const panelCalls = w.panelCalls;
+  const panel = {
+    async open(userId: string, symbol: unknown, side: unknown, size: unknown, clientId: string) {
+      panelCalls.push({ fn: "open", userId, symbol, side, size, clientId });
+      if (w.panelError) throw w.panelError;
+      return { fillId: "f-1", duplicate: false, balance: 9990, position: null };
+    },
+    async close(userId: string, symbol: unknown, size: unknown, clientId: string) {
+      panelCalls.push({ fn: "close", userId, symbol, size, clientId });
+      if (w.panelError) throw w.panelError;
+      return { fillId: "f-2", duplicate: false, balance: 10000, position: null };
+    },
+    async reset(userId: string) { panelCalls.push({ fn: "reset", userId }); if (w.panelError) throw w.panelError; },
+    async accountView(userId: string, dayStartMs: number) {
+      panelCalls.push({ fn: "view", userId, dayStartMs });
+      if (w.exchangeError) throw w.exchangeError;
+      return { balance: 10000, equity: 10000, positions: [], fills: [], prices: [] } as never;
+    },
+  };
+  const feed = {
+    async getQuotes() {
+      if (w.exchangeError) throw w.exchangeError;
+      return new Map(["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "DOGEUSD"].map((symbol) => [symbol, { symbol, bid: 60000, ask: 60001, last: 60000.5, sourceTs: w.clock, fetchedAt: w.clock - 2000 }]));
+    },
+  };
   const deps: Deps = {
     store,
     exchange: () => exchange,
+    paper: panel,
+    prices: feed,
     now: () => w.clock,
     groqKey: () => "gsk_test",
     region: () => "eu-west-1",
@@ -157,12 +187,12 @@ test("health: ok when db and exchange respond, degraded (still 200) otherwise", 
   const h = build(w);
   let r = await call(h.health, req("GET"));
   assert.equal(r.status, 200);
-  assert.deepEqual([r.body!.ok, r.body!.db, r.body!.exchange, r.body!.region, r.body!.voice], [true, "ok", "ok", "eu-west-1", "configured"]);
+  assert.deepEqual([r.body!.ok, r.body!.db, r.body!.priceSource.status, r.body!.priceSource.ageMs, r.body!.region, r.body!.voice, r.body!.mode], [true, "ok", "ok", 1200, "eu-west-1", "configured", "PAPER"]);
   w.dbDown = true;
-  w.exchangeError = new BybitError("region_blocked", "blocked", null, 403);
+  w.exchangeError = new ExchangeError("prices_unavailable", "source down");
   r = await call(h.health, req("GET"));
   assert.equal(r.status, 200);
-  assert.deepEqual([r.body!.ok, r.body!.db, r.body!.exchange], [false, "error", "region_blocked"]);
+  assert.deepEqual([r.body!.ok, r.body!.db, r.body!.priceSource.status], [false, "error", "prices_unavailable"]);
 });
 
 test("authentication: missing, malformed, unknown and publishable-key credentials are 401", async () => {
@@ -251,15 +281,13 @@ test("positions: empty account is an honest empty list, not an error", async () 
   assert.deepEqual([r.body!.state, r.body!.positions, r.body!.left], ["CALM", [], 500]);
 });
 
-test("positions: exchange failures map to honest 5xx codes and never show CALM", async () => {
+test("positions: price failures map to honest 5xx codes and never show CALM", async () => {
   const w = newWorld();
   const h = build(w);
-  const cases: [BybitError, number, string][] = [
-    [new BybitError("region_blocked", "x", null, 403), 503, "exchange_region_blocked"],
-    [new BybitError("rate_limited", "x"), 503, "exchange_rate_limited"],
-    [new BybitError("auth", "x", 10003), 503, "exchange_auth"],
-    [new BybitError("network", "x"), 503, "exchange_unreachable"],
-    [new BybitError("bad_response", "x"), 502, "exchange_bad_response"],
+  const cases: [ExchangeError, number, string][] = [
+    [new ExchangeError("prices_stale", "old"), 503, "prices_stale"],
+    [new ExchangeError("prices_unavailable", "down"), 503, "prices_unavailable"],
+    [new ExchangeError("rejected", "nope", "insufficient_margin"), 409, "insufficient_margin"],
   ];
   for (const [err, status, code] of cases) {
     w.exchangeError = err;
@@ -424,15 +452,15 @@ test("act: dust positions below the minimum are reported, not rounded up", async
 test("act: if every order fails the slot is released so the user can retry; failures are logged", async () => {
   const w = newWorld();
   w.positions = [long(0.5, -100)];
-  w.placeError = () => new BybitError("exchange", "Unable to retrieve a price of the market order due to low liquidity", 110118, 200);
+  w.placeError = () => new ExchangeError("rejected", "That is larger than the open position.", "reduce_only_exceeds_position");
   const h = build(w);
   const p = await propose(h, "cut_all");
   w.clock += 1500;
   const c = await confirmReq(h, p.body!.proposalId, "cut_all");
   assert.equal(c.status, 200);
-  assert.deepEqual([c.body!.executed, c.body!.failed, c.body!.results[0].reason], [0, 1, "exchange_rejected:110118"]);
+  assert.deepEqual([c.body!.executed, c.body!.failed, c.body!.results[0].reason], [0, 1, "reduce_only_exceeds_position"]);
   assert.equal(w.limits.last_action_at, null, "cooldown must not be consumed by a total failure");
-  assert.ok(w.logs.some((l) => l.status === "failed" && l.reason === "exchange_rejected:110118"));
+  assert.ok(w.logs.some((l) => l.status === "failed" && l.reason === "reduce_only_exceeds_position"));
   // and a retry is possible
   w.placeError = null;
   assert.equal((await propose(h, "cut_all")).status, 200);
@@ -441,7 +469,7 @@ test("act: if every order fails the slot is released so the user can retry; fail
 test("act: a partial failure keeps the cooldown (something was executed)", async () => {
   const w = newWorld();
   w.positions = [long(0.5, -100), long(1, -5, "ETHUSDT")];
-  w.placeError = (o) => (o.symbol === "ETHUSDT" ? new BybitError("exchange", "nope", 110017) : null);
+  w.placeError = (o) => (o.symbol === "ETHUSDT" ? new ExchangeError("rejected", "nope", "insufficient_margin") : null);
   const h = build(w);
   const p = await propose(h, "cut_all");
   w.clock += 1500;
@@ -576,4 +604,89 @@ test("errors never leak internals", async () => {
   } finally {
     console.error = prev;
   }
+});
+
+// ---------------------------------------------------------------- PAPER label, paper panel, prices
+
+test("every JSON response, including errors and 404-ish ones, is labelled PAPER", async () => {
+  const w = newWorld();
+  const h = build(w);
+  w.positions = [long(0.5, -10)];
+  const ok = await call(h.positions, req("GET", undefined, device));
+  assert.equal(ok.body!.mode, "PAPER");
+  const err = await call(h.positions, req("GET"));
+  assert.equal(err.body!.mode, "PAPER");
+  const lim = await call(h.limits, req("GET", undefined, device));
+  assert.equal(lim.body!.mode, "PAPER");
+  const bad = await call(h.act, req("POST", { action: "x" }, device));
+  assert.equal(bad.body!.mode, "PAPER");
+});
+
+test("paper panel: GET works for device and user; writes are website-only", async () => {
+  const w = newWorld();
+  const h = build(w);
+  assert.equal((await call(h.paper, req("GET", undefined, device))).status, 200);
+  assert.equal((await call(h.paper, req("GET", undefined, user))).status, 200);
+  const denied = await call(h.paper, req("POST", { action: "open", symbol: "BTCUSD", side: "Buy", size: 0.1, clientId: "click-0001" }, device));
+  assert.equal(denied.status, 403);
+  assert.equal(w.panelCalls.filter((c) => c.fn === "open").length, 0);
+  assert.equal((await call(h.paper, req("POST", { action: "open" }))).status, 401);
+});
+
+test("paper panel: open and close pass validated input through with an idempotency key", async () => {
+  const w = newWorld();
+  const h = build(w);
+  const open = await call(h.paper, req("POST", { action: "open", symbol: "BTCUSD", side: "Buy", size: 0.1, clientId: "click-0001" }, user));
+  assert.deepEqual([open.status, open.body!.fillId, open.body!.mode], [200, "f-1", "PAPER"]);
+  assert.deepEqual(w.panelCalls.at(-1), { fn: "open", userId: USER, symbol: "BTCUSD", side: "Buy", size: 0.1, clientId: "web-click-0001" });
+  const close = await call(h.paper, req("POST", { action: "close", symbol: "BTCUSD", clientId: "click-0002" }, user));
+  assert.equal(close.status, 200);
+  assert.deepEqual(w.panelCalls.at(-1), { fn: "close", userId: USER, symbol: "BTCUSD", size: undefined, clientId: "web-click-0002" });
+  assert.equal((await call(h.paper, req("POST", { action: "reset" }, user))).body!.reset, true);
+});
+
+test("paper panel: a missing or malformed clientId is rejected before anything runs", async () => {
+  const w = newWorld();
+  const h = build(w);
+  for (const clientId of [undefined, "short", "has spaces here", "x".repeat(40), 12345678, null]) {
+    const r = await call(h.paper, req("POST", { action: "open", symbol: "BTCUSD", side: "Buy", size: 1, clientId }, user));
+    assert.equal(r.status, 400, String(clientId));
+  }
+  assert.equal(w.panelCalls.length, 0);
+  assert.equal((await call(h.paper, req("POST", { action: "explode" }, user))).status, 400);
+});
+
+test("paper panel: account rejections and stale prices surface as honest errors", async () => {
+  const w = newWorld();
+  const h = build(w);
+  w.panelError = new ExchangeError("rejected", "Not enough margin.", "insufficient_margin");
+  const r1 = await call(h.paper, req("POST", { action: "open", symbol: "BTCUSD", side: "Buy", size: 5, clientId: "click-0003" }, user));
+  assert.deepEqual([r1.status, r1.body!.error.code], [409, "insufficient_margin"]);
+  w.panelError = new ExchangeError("prices_stale", "old");
+  const r2 = await call(h.paper, req("POST", { action: "open", symbol: "BTCUSD", side: "Buy", size: 1, clientId: "click-0004" }, user));
+  assert.deepEqual([r2.status, r2.body!.error.code], [503, "prices_stale"]);
+  w.panelError = new ExchangeError("bad_request", "Size must be a multiple of 0.0001.");
+  assert.equal((await call(h.paper, req("POST", { action: "open", symbol: "BTCUSD", side: "Buy", size: 0.00005, clientId: "click-0005" }, user))).status, 400);
+});
+
+test("paper panel: writes are rate limited per user", async () => {
+  const w = newWorld();
+  const h = build(w);
+  let last = 0;
+  for (let i = 0; i < 32; i++) last = (await call(h.paper, req("POST", { action: "reset" }, user))).status;
+  assert.equal(last, 429);
+});
+
+test("prices: public, labelled, shows age, and fails honestly when the source is down", async () => {
+  const w = newWorld();
+  const h = build(w);
+  const r = await call(h.prices, req("GET"));
+  assert.equal(r.status, 200);
+  assert.equal(r.body!.mode, "PAPER");
+  assert.match(r.body!.source, /Bitstamp/);
+  assert.deepEqual(r.body!.quotes.map((q: any) => q.symbol), ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "DOGEUSD"]);
+  assert.deepEqual([r.body!.quotes[0].bid, r.body!.quotes[0].ageMs], [60000, 2000]);
+  w.exchangeError = new ExchangeError("prices_unavailable", "down");
+  const down = await call(h.prices, req("GET"));
+  assert.deepEqual([down.status, down.body!.error.code], [503, "prices_unavailable"]);
 });
