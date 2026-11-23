@@ -4,6 +4,7 @@
 
 - **Track:** Track 3, Exchanges & Stocks, "Heads Up: Even Realities Hackathon" (DoraHacks).
 - **Live site:** https://ace-coderr.github.io/haltline/
+- **Demo video:** https://youtu.be/FE8zsHU2s8o (shows the official Even Hub simulator and a paper account; not tried on physical glasses).
 - **Who it is for:** active traders (crypto and equities) who set a daily loss limit and keep breaking it, because the moment they most need to look at a phone is the moment they least want to.
 - **What it is not:** a stop-loss tool, a ticker or a portfolio tracker. It does one job: limit awareness and a last-gesture action.
 

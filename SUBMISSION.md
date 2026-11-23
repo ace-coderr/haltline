@@ -52,7 +52,7 @@ The official Even Hub minimal template was first downloaded on 19 Nov 2026 to te
 - Live site: https://ace-coderr.github.io/haltline/
 - Source: https://github.com/ace-coderr/haltline
 - Audit: `AUDIT.md`. Feature requests for the Even Hub SDK: `FEATURE_REQUESTS.md`.
-- Demo video: _to be added after recording._
+- Demo video: https://youtu.be/FE8zsHU2s8o (shows the official Even Hub simulator and a paper account; not tried on physical glasses).
 
 ## Built with
 
