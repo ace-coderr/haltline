@@ -17,6 +17,14 @@ export const INPUT_DEBOUNCE_MS = 250
 /** After this long without a good reply, live numbers are replaced by an offline screen. */
 export const STALE_AFTER_MS = 15_000
 export const NOTICE_MS = 4_000
+/** The microphone listens for this long, or until the user presses/swipes to finish. */
+export const LISTEN_MS = 4_500
+/** Shortest recording worth sending (shorter means nothing was said). */
+export const MIN_SPEECH_MS = 500
+/** A spoken limit must be confirmed within this long. */
+export const VOICE_CONFIRM_MS = 20_000
+/** Gesture fallback for setting a limit when voice is unavailable: any swipe moves to the next value. */
+export const LIMIT_PRESETS: readonly number[] = [100, 250, 500, 1000, 2500]
 
 export type RiskState = 'CALM' | 'CLOSING' | 'TRIPPED'
 
@@ -46,6 +54,13 @@ export interface Problem {
   since: number
 }
 
+export type VoicePhase =
+  | { phase: 'listening'; startedAt: number }
+  | { phase: 'thinking' }
+  | { phase: 'stepper'; index: number }
+  | { phase: 'confirm'; amount: number; heard: string | null; shownAt: number; expiresAt: number }
+  | { phase: 'failed'; message: string; heard: string | null; fallback: boolean }
+
 export interface AppState {
   phase: 'boot' | 'pairing' | 'ready'
   pairing: { code: string; expiresAt: number } | null
@@ -56,6 +71,7 @@ export interface AppState {
   /** True once the user dismissed the current TRIPPED episode, so the menu does not reopen. */
   dismissedTrip: boolean
   pending: Proposal | null
+  voice: VoicePhase | null
   busy: 'proposing' | 'confirming' | null
   notice: { text: string; until: number } | null
   lastInputAt: number
@@ -70,6 +86,7 @@ export const initialState = (): AppState => ({
   menu: { open: false, index: 0 },
   dismissedTrip: false,
   pending: null,
+  voice: null,
   busy: null,
   notice: null,
   lastInputAt: -Infinity,
@@ -87,12 +104,17 @@ export type AppEvent =
   | { type: 'dismissed'; at: number }
   | { type: 'action_failed'; text: string; at: number }
   | { type: 'confirmed'; text: string; at: number }
+  | { type: 'voice_heard'; amount: number; heard: string; at: number }
+  | { type: 'voice_failed'; message: string; heard: string | null; fallback: boolean }
   | { type: 'tick'; at: number }
 
 export type Effect =
   | { type: 'propose'; kind: ActionKind }
   | { type: 'confirm'; proposalId: string; kind: Exclude<ActionKind, 'dismiss'> }
   | { type: 'refresh' }
+  | { type: 'listen_start' }
+  | { type: 'listen_stop' }
+  | { type: 'set_limit'; amount: number }
 
 export interface Update {
   state: AppState
@@ -117,7 +139,7 @@ export function update(prev: AppState, ev: AppEvent): Update {
       let s: AppState = { ...prev, phase: 'ready', snapshot: ev.snapshot, lastOkAt: ev.at, problem: null }
       if (ev.snapshot.state !== 'TRIPPED' && prev.dismissedTrip) s = { ...s, dismissedTrip: false }
       // A new TRIPPED episode opens the action menu by itself, preselecting CUT HALF.
-      if (ev.snapshot.state === 'TRIPPED' && !s.dismissedTrip && !s.menu.open && !s.pending && !s.busy) {
+      if (ev.snapshot.state === 'TRIPPED' && !s.dismissedTrip && !s.menu.open && !s.pending && !s.busy && !s.voice) {
         s = { ...s, menu: { open: true, index: 0 } }
       }
       // Back under the limit: nothing to act on, close a menu that opened for the trip.
@@ -136,8 +158,28 @@ export function update(prev: AppState, ev: AppEvent): Update {
       if (prev.phase !== 'ready' || prev.busy) return noop(prev)
       if (ev.at - prev.lastInputAt < INPUT_DEBOUNCE_MS) return noop(prev)
       const base = { ...prev, lastInputAt: ev.at }
+      const v = prev.voice
+      if (v) {
+        switch (v.phase) {
+          case 'listening': // any swipe finishes the recording early
+            return { state: { ...base, voice: { phase: 'thinking' } }, effects: [{ type: 'listen_stop' }] }
+          case 'thinking':
+            return noop(base)
+          case 'stepper': // direction-agnostic: any swipe moves to the next preset value
+            return noop({ ...base, voice: { phase: 'stepper', index: (v.index + 1) % LIMIT_PRESETS.length } })
+          case 'confirm': // a swipe only cancels
+          case 'failed':
+            return noop({ ...base, voice: null })
+        }
+      }
       if (prev.pending) return noop({ ...base, pending: null, notice: null }) // swipe cancels the confirm step
-      if (!prev.menu.open) return noop(base)
+      if (!prev.menu.open) {
+        // On an idle screen a swipe means "talk to me": start listening for a spoken limit.
+        if (!prev.notice && prev.snapshot && !isBlocked(prev, ev.at)) {
+          return { state: { ...base, voice: { phase: 'listening', startedAt: ev.at } }, effects: [{ type: 'listen_start' }] }
+        }
+        return noop(base)
+      }
       // Direction is deliberately ignored: how the glasses map scroll events to swipe up/down is not
       // documented and not verified on hardware, so ANY swipe advances to the next option. Every
       // option is reachable in at most two swipes, and a wrong guess cannot select anything.
@@ -150,6 +192,33 @@ export function update(prev: AppState, ev: AppEvent): Update {
       if (ev.at - prev.lastInputAt < INPUT_DEBOUNCE_MS) return noop(prev)
       const base = { ...prev, lastInputAt: ev.at }
       if (isBlocked(prev, ev.at)) return noop(base)
+
+      const v = prev.voice
+      if (v) {
+        switch (v.phase) {
+          case 'listening':
+            return { state: { ...base, voice: { phase: 'thinking' } }, effects: [{ type: 'listen_stop' }] }
+          case 'thinking':
+            return noop(base)
+          case 'stepper': {
+            const amount = LIMIT_PRESETS[v.index] ?? LIMIT_PRESETS[0] ?? 100
+            return noop({ ...base, voice: { phase: 'confirm', amount, heard: null, shownAt: ev.at, expiresAt: ev.at + VOICE_CONFIRM_MS } })
+          }
+          case 'failed':
+            return v.fallback
+              ? noop({ ...base, voice: { phase: 'stepper', index: Math.max(0, LIMIT_PRESETS.indexOf(500)) } })
+              : { state: { ...base, voice: { phase: 'listening', startedAt: ev.at } }, effects: [{ type: 'listen_start' }] }
+          case 'confirm': {
+            if (ev.at - v.shownAt < MIN_CONFIRM_MS) return noop(base) // stray press
+            if (ev.at >= v.expiresAt) return noop(withNotice({ ...base, voice: null }, 'EXPIRED', ev.at))
+            return { state: { ...base, busy: 'confirming', voice: null }, effects: [{ type: 'set_limit', amount: v.amount }] }
+          }
+        }
+      }
+
+      if (prev.snapshot?.state === 'NO_LIMIT' && !prev.pending && !prev.menu.open) {
+        return { state: { ...base, voice: { phase: 'listening', startedAt: ev.at } }, effects: [{ type: 'listen_start' }] }
+      }
 
       if (prev.pending) {
         if (ev.at - prev.pending.shownAt < MIN_CONFIRM_MS) return noop(base) // stray press
@@ -187,8 +256,20 @@ export function update(prev: AppState, ev: AppEvent): Update {
         effects: [{ type: 'refresh' }],
       }
 
+    case 'voice_heard':
+      if (prev.voice?.phase !== 'thinking') return noop(prev)
+      return noop({ ...prev, voice: { phase: 'confirm', amount: ev.amount, heard: ev.heard, shownAt: ev.at, expiresAt: ev.at + VOICE_CONFIRM_MS } })
+
+    case 'voice_failed':
+      if (prev.voice?.phase !== 'thinking' && prev.voice?.phase !== 'listening') return noop(prev)
+      return noop({ ...prev, voice: { phase: 'failed', message: ev.message, heard: ev.heard, fallback: ev.fallback } })
+
     case 'tick': {
       let s = prev
+      if (s.voice?.phase === 'listening' && ev.at - s.voice.startedAt >= LISTEN_MS) {
+        return { state: { ...s, voice: { phase: 'thinking' } }, effects: [{ type: 'listen_stop' }] }
+      }
+      if (s.voice?.phase === 'confirm' && ev.at >= s.voice.expiresAt) s = withNotice({ ...s, voice: null }, 'EXPIRED', ev.at)
       if (s.notice && ev.at >= s.notice.until) s = { ...s, notice: null }
       if (s.pending && ev.at >= s.pending.expiresAt && !s.busy) s = withNotice({ ...s, pending: null }, 'EXPIRED', ev.at)
       return s === prev ? noop(prev) : noop(s)
@@ -207,7 +288,9 @@ function isBlocked(s: AppState, at: number): boolean {
 // ---------------------------------------------------------------------------
 
 export interface Screen {
-  kind: 'loading' | 'pairing' | 'offline' | 'prices' | 'no_limit' | 'state' | 'menu' | 'confirm' | 'notice'
+  kind:
+    | 'loading' | 'pairing' | 'offline' | 'prices' | 'no_limit' | 'state' | 'menu' | 'confirm' | 'notice'
+    | 'listening' | 'thinking' | 'stepper' | 'voice_confirm' | 'voice_failed'
   /** Small line at the top. Always starts with PAPER. */
   status: string
   /** The giant text, drawn into the two image containers. */
@@ -276,6 +359,38 @@ export function buildScreen(s: AppState, now: number): Screen {
       return { kind: 'prices', status: 'PAPER · NO PRICES', big: 'NO PRICES', gauge: null, pulse: false, sub: 'Live prices are unavailable. Numbers hidden.', hint: 'retrying…' }
     }
     return { kind: 'offline', status: 'PAPER · OFFLINE', big: 'OFFLINE', gauge: null, pulse: false, sub: known, hint: 'retrying…' }
+  }
+
+  if (s.voice) {
+    const v = s.voice
+    const status = 'PAPER · VOICE'
+    switch (v.phase) {
+      case 'listening': {
+        const left = Math.max(0, Math.ceil((LISTEN_MS - (now - v.startedAt)) / 1000))
+        return { kind: 'listening', status, big: 'LISTENING', gauge: null, pulse: false, sub: 'say: set limit five hundred', hint: `press or swipe: done · ${left}s` }
+      }
+      case 'thinking':
+        return { kind: 'thinking', status, big: 'HEARING', gauge: null, pulse: false, sub: 'Working out what you said…', hint: '' }
+      case 'stepper':
+        return {
+          kind: 'stepper', status: 'PAPER · SET LIMIT', big: formatUsdWhole(LIMIT_PRESETS[v.index] ?? 0), gauge: null, pulse: false,
+          sub: 'daily limit', hint: 'swipe: next value · press: choose',
+        }
+      case 'confirm': {
+        const secs = Math.max(0, Math.ceil((v.expiresAt - now) / 1000))
+        return {
+          kind: 'voice_confirm', status: `PAPER · SET LIMIT`, big: `LIMIT ${formatUsdWhole(v.amount)}`, gauge: null, pulse: false,
+          sub: v.heard ? `heard: "${v.heard.length > 38 ? v.heard.slice(0, 37) + '…' : v.heard}"` : 'chosen with swipes',
+          hint: `press: confirm · swipe: cancel · ${secs}s`,
+        }
+      }
+      case 'failed':
+        return {
+          kind: 'voice_failed', status, big: v.message, gauge: null, pulse: false,
+          sub: v.heard ? `heard: "${v.heard.length > 38 ? v.heard.slice(0, 37) + '…' : v.heard}"` : v.fallback ? 'Voice is unavailable. Set it by swipes instead.' : '',
+          hint: v.fallback ? 'press: set by swipes · swipe: back' : 'press: try again · swipe: back',
+        }
+    }
   }
 
   if (s.notice && now < s.notice.until) {

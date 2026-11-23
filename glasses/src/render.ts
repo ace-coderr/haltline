@@ -5,7 +5,7 @@
 // Text updates are a few dozen bytes; images are re-sent only when the giant text changes.
 
 import {
-  CreateStartUpPageContainer, type EvenAppBridge, ImageContainerProperty, ImageRawDataUpdate, RebuildPageContainer,
+  CreateStartUpPageContainer, type EvenAppBridge, ImageContainerProperty, ImageRawDataUpdate, ImageRawDataUpdateResult, RebuildPageContainer,
   TextContainerProperty, TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
 import { BIG_H, HALF_W, renderBig } from './canvas.ts'
@@ -35,6 +35,8 @@ export class Renderer {
   private want: Frame | null = null
   private flushing = false
   private ready = false
+  /** After a failed write, wait before trying again so a persistent fault cannot flood BLE. */
+  private retryAt = 0
 
   constructor(bridge: EvenAppBridge) {
     this.bridge = bridge
@@ -76,7 +78,7 @@ export class Renderer {
   /** Requests a frame. Cheap to call often; only differences are transmitted. */
   draw(frame: Frame): void {
     this.want = frame
-    if (this.ready && !this.flushing) void this.flush()
+    if (this.ready && !this.flushing && Date.now() >= this.retryAt) void this.flush()
   }
 
   private async setText(field: 'status' | 'gauge' | 'sub' | 'hint', content: string): Promise<void> {
@@ -100,8 +102,12 @@ export class Renderer {
         }
         if (want.big !== shown.big) {
           const { left, right } = await renderBig(want.big)
-          await this.bridge.updateImageRawData(new ImageRawDataUpdate({ containerID: ID.imgL, containerName: NAME.imgL, imageData: left }))
-          await this.bridge.updateImageRawData(new ImageRawDataUpdate({ containerID: ID.imgR, containerName: NAME.imgR, imageData: right }))
+          // Images are sent one at a time and each result is checked: a dropped half must never be
+          // recorded as shown, or the two halves of the giant text would disagree on the glasses.
+          const a = await this.bridge.updateImageRawData(new ImageRawDataUpdate({ containerID: ID.imgL, containerName: NAME.imgL, imageData: left }))
+          if (!ImageRawDataUpdateResult.isSuccess(a)) throw new Error('left image: ' + String(a))
+          const b = await this.bridge.updateImageRawData(new ImageRawDataUpdate({ containerID: ID.imgR, containerName: NAME.imgR, imageData: right }))
+          if (!ImageRawDataUpdateResult.isSuccess(b)) throw new Error('right image: ' + String(b))
           shown.big = want.big
         }
       }
@@ -109,6 +115,7 @@ export class Renderer {
       console.error('render failed', e instanceof Error ? e.message : String(e))
       // force a full resend next time rather than trusting what is on the glasses
       this.shown = this.shown ? { status: '\u0000', gauge: '\u0000', sub: '\u0000', hint: '\u0000', big: '\u0000' } : null
+      this.retryAt = Date.now() + 1500
     } finally {
       this.flushing = false
     }

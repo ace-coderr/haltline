@@ -15,6 +15,10 @@
       "whitelist": [
         "https://zlckjbqocxhwbvhegjlb.supabase.co"
       ]
+    },
+    {
+      "name": "g2-microphone",
+      "desc": "Listens only while you ask it to, to hear a spoken daily limit such as \"set limit five hundred\". The recording is sent to the Haltline backend for transcription; Haltline does not store it."
     }
   ],
   "supported_languages": [

@@ -30,6 +30,23 @@ never shown stale), prices unavailable, no limit set, no open positions, cooldow
   stray press), and the server enforces a 60 s cooldown and the kill switch.
 - Double press is **never** used as an action: the platform uses it to exit the app.
 
+## Voice (optional bonus; the core works without it)
+
+On an idle screen, **any swipe** starts listening for up to 4.5 s (or press/swipe again to finish). Say
+"set limit five hundred". The recording is sent to the `transcribe` Edge Function (Groq Whisper, free tier:
+about 20 requests/min and 2,000/day, no SLA), parsed ("five hundred", "1,200", "twelve hundred"), and shown as
+`LIMIT $500 · heard: "Set limit 500."`. Nothing is written until you press to confirm (a press in the first
+0.9 s is ignored), and swipe cancels. If Groq is down or rate limited, or the microphone is unavailable, the screen
+says so ("VOICE UNAVAILABLE") and **press** opens a gesture fallback: any swipe steps through $100 / $250 / $500 /
+$1,000 / $2,500, press chooses, then the same confirm. Raising the limit from the glasses is refused by the server
+while you are close to it or past it (use the website).
+
+Verified: the live `transcribe` function with synthesized speech ("Set limit five hundred" -> 500, "twelve
+hundred dollars" -> 1200, unrelated speech -> unclear), and in the simulator the full microphone path (listening
+screen, PCM events, WAV upload, transcript, "didn't catch that" with the heard text). **Not verified:** a spoken
+command taking the success path through the simulator microphone (the simulator uses the PC microphone and I could
+not inject speech into it), and the microphone PCM format on real glasses.
+
 ## Structure
 
 - `src/model.ts`: pure state machine and screen builder (unit-tested, no DOM or SDK).

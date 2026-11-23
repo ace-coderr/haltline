@@ -6,7 +6,10 @@ import { OsEventTypeList, waitForEvenAppBridge } from '@evenrealities/even_hub_s
 import { ApiFail, confirmText, createApi, failText } from './api.ts'
 import { CONFIGURED, SUPABASE_ANON_KEY, SUPABASE_URL, TOKEN_STORAGE_KEY } from './config.ts'
 import { stepGauge } from './gauge.ts'
-import { type AppEvent, buildScreen, type Effect, gaugeText, initialState, type Proposal, type Screen, update } from './model.ts'
+import {
+  type AppEvent, buildScreen, type Effect, formatUsdWhole, gaugeText, initialState, MIN_SPEECH_MS, type Proposal, type Screen, update,
+} from './model.ts'
+import { concatChunks, pcmDurationMs, pcmToWav } from './wav.ts'
 import { Renderer } from './render.ts'
 
 const REFRESH_MS = 5000
@@ -54,8 +57,77 @@ function paint(): void {
   renderer.draw(toFrame(screen, now))
 }
 
+// -------------------------------------------------------------------- voice
+
+let pcmChunks: Uint8Array[] = []
+let listening = false
+
+async function startListening(): Promise<void> {
+  pcmChunks = []
+  listening = true
+  let ok = false
+  try {
+    ok = await bridge.audioControl(true)
+  } catch {
+    ok = false
+  }
+  if (!ok) {
+    listening = false
+    dispatch({ type: 'voice_failed', message: 'MIC UNAVAILABLE', heard: null, fallback: true })
+  }
+}
+
+async function stopListeningAndTranscribe(): Promise<void> {
+  listening = false
+  try {
+    await bridge.audioControl(false)
+  } catch { /* the microphone is closed on exit anyway */ }
+  const pcm = concatChunks(pcmChunks)
+  pcmChunks = []
+  if (pcmDurationMs(pcm.byteLength) < MIN_SPEECH_MS) {
+    return dispatch({ type: 'voice_failed', message: 'NO SPEECH HEARD', heard: null, fallback: false })
+  }
+  if (!token) return dispatch({ type: 'voice_failed', message: 'NOT PAIRED', heard: null, fallback: false })
+  try {
+    const r = await api.transcribe(token, pcmToWav(pcm))
+    const heard = r.text
+    if (r.command.kind === 'set_limit') return dispatch({ type: 'voice_heard', amount: r.command.amount, heard, at: Date.now() })
+    if (r.command.kind === 'out_of_range') return dispatch({ type: 'voice_failed', message: 'LIMIT: $1 TO $1,000,000', heard, fallback: false })
+    return dispatch({ type: 'voice_failed', message: "DIDN'T CATCH THAT", heard, fallback: false })
+  } catch (e) {
+    if (e instanceof ApiFail && e.status === 401) return void unpair()
+    if (e instanceof ApiFail && e.code === 'bad_audio') return dispatch({ type: 'voice_failed', message: 'NO SPEECH HEARD', heard: null, fallback: false })
+    // Groq down, rate limited, offline: a visible failure with a gesture fallback.
+    const wait = e instanceof ApiFail && e.retryAfterMs ? ` · TRY IN ${Math.ceil(e.retryAfterMs / 1000)}s` : ''
+    dispatch({ type: 'voice_failed', message: `VOICE UNAVAILABLE${wait}`.slice(0, 32), heard: null, fallback: true })
+  }
+}
+
 async function run(fx: Effect): Promise<void> {
-  if (fx.type === 'refresh') return void refresh()
+  switch (fx.type) {
+    case 'refresh':
+      return void refresh()
+    case 'listen_start':
+      return void startListening()
+    case 'listen_stop':
+      return void stopListeningAndTranscribe()
+    case 'set_limit': {
+      if (!token) return dispatch({ type: 'action_failed', text: 'NOT PAIRED', at: Date.now() })
+      try {
+        const r = await api.setLimit(token, fx.amount)
+        return dispatch({ type: 'confirmed', text: `LIMIT ${formatUsdWhole(r.limit)}`, at: Date.now() })
+      } catch (e) {
+        if (e instanceof ApiFail && e.status === 401) return void unpair()
+        return dispatch({ type: 'action_failed', text: failText(e), at: Date.now() })
+      }
+    }
+    case 'propose':
+    case 'confirm':
+      return runAction(fx)
+  }
+}
+
+async function runAction(fx: Extract<Effect, { type: 'propose' | 'confirm' }>): Promise<void> {
   if (!token) return dispatch({ type: 'action_failed', text: 'NOT PAIRED', at: Date.now() })
   try {
     if (fx.type === 'propose') {
@@ -143,6 +215,10 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 const typeOf = (env?: { eventType?: OsEventTypeList }): OsEventTypeList | null => (env ? (env.eventType ?? OsEventTypeList.CLICK_EVENT) : null)
 
 bridge.onEvenHubEvent((event) => {
+  if (event.audioEvent) {
+    if (listening) pcmChunks.push(event.audioEvent.audioPcm)
+    return
+  }
   const types = [typeOf(event.sysEvent), typeOf(event.textEvent), typeOf(event.listEvent)]
   const has = (t: OsEventTypeList) => types.includes(t)
   const at = Date.now()
@@ -152,7 +228,13 @@ bridge.onEvenHubEvent((event) => {
     void bridge.shutDownPageContainer(1)
     return
   }
-  if (has(OsEventTypeList.FOREGROUND_EXIT_EVENT)) foreground = false
+  if (has(OsEventTypeList.FOREGROUND_EXIT_EVENT)) {
+    foreground = false
+    if (listening) {
+      listening = false
+      void bridge.audioControl(false)
+    }
+  }
   if (has(OsEventTypeList.FOREGROUND_ENTER_EVENT)) {
     foreground = true
     void refresh()
@@ -163,6 +245,11 @@ bridge.onEvenHubEvent((event) => {
 })
 
 // -------------------------------------------------------------------- boot
+
+const fixtureSnapshot = () => ({
+  lastOkAt: Date.now(),
+  snapshot: { asOf: '', state: 'NO_LIMIT' as const, limit: null, used: null, left: null, fraction: null, killSwitch: false, cooldown: { active: false, retryAfterMs: 0 }, positions: [] },
+})
 
 // Development aid only (stripped from production builds): `?preview=offline|prices|loading` renders
 // that screen through the real renderer without touching the backend, to capture non-live screens.
@@ -177,9 +264,37 @@ if (preview) {
     prices: () => {
       state = { ...initialState(), phase: 'ready', problem: { kind: 'prices', since: 0 } }
     },
+    // voice screens, rendered without a microphone or backend (a number-free snapshot lets them show)
+    stepper: () => {
+      state = { ...initialState(), phase: 'ready', ...fixtureSnapshot(), voice: { phase: 'stepper', index: 2 } }
+    },
+    voice_confirm: () => {
+      const now = Date.now()
+      state = { ...initialState(), phase: 'ready', ...fixtureSnapshot(), voice: { phase: 'confirm', amount: 500, heard: 'Set limit 500.', shownAt: now, expiresAt: now + 19_500 } }
+    },
+    voice_unavailable: () => {
+      state = { ...initialState(), phase: 'ready', ...fixtureSnapshot(), voice: { phase: 'failed', message: 'VOICE UNAVAILABLE', heard: null, fallback: true } }
+    },
+    // stress the renderer: switches between very different screens every 2.5 s
+    cycle: () => {
+      const seq = [
+        () => ({ ...initialState(), phase: 'ready' as const, problem: { kind: 'offline' as const, since: 0 } }),
+        () => ({ ...initialState(), phase: 'ready' as const, problem: { kind: 'prices' as const, since: 0 } }),
+        () => ({ ...initialState(), phase: 'boot' as const }),
+        () => ({ ...initialState(), phase: 'pairing' as const, pairing: { code: '123456', expiresAt: Date.now() + 600_000 } }),
+        () => ({ ...initialState(), phase: 'ready' as const, voice: { phase: 'thinking' as const } }),
+      ]
+      let i = 0
+      state = seq[0]!()
+      setInterval(() => {
+        i = (i + 1) % seq.length
+        state = seq[i]!()
+      }, 2500)
+    },
   }
   fixtures[preview]?.()
   await renderer.init(toFrame(buildScreen(state, Date.now()), Date.now()))
+  setInterval(paint, FRAME_MS)
 } else if (!CONFIGURED) {
   const frame = { status: 'PAPER', big: 'NOT CONFIGURED', gauge: '', sub: 'This build has no backend address.', hint: '' }
   await renderer.init(frame)

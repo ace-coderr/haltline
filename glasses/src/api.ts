@@ -45,18 +45,22 @@ export function createApi(cfg: ApiConfig) {
   const doFetch = cfg.fetchFn ?? fetch.bind(globalThis)
   const timeoutMs = cfg.timeoutMs ?? 8000
 
-  async function call<T>(fn: string, opts: { method?: 'GET' | 'POST'; body?: unknown; token?: string | null } = {}): Promise<T> {
+  async function call<T>(
+    fn: string,
+    opts: { method?: 'GET' | 'POST'; body?: unknown; token?: string | null; raw?: { body: Uint8Array; contentType: string } } = {},
+  ): Promise<T> {
     const headers: Record<string, string> = { apikey: cfg.anonKey }
     if (opts.token) headers['x-device-token'] = opts.token
     if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
+    if (opts.raw) headers['Content-Type'] = opts.raw.contentType
     const ctl = new AbortController()
     const timer = setTimeout(() => ctl.abort(), timeoutMs)
     let res: Response
     try {
       res = await doFetch(`${cfg.baseUrl}/functions/v1/${fn}`, {
-        method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
+        method: opts.method ?? (opts.body !== undefined || opts.raw ? 'POST' : 'GET'),
         headers,
-        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        body: opts.raw ? (opts.raw.body as BodyInit) : opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
         signal: ctl.signal,
       })
     } catch {
@@ -81,6 +85,12 @@ export function createApi(cfg: ApiConfig) {
     pairStart: () => call<{ code: string; token: string; expiresInSeconds: number }>('pair', { body: { action: 'start' } }),
     pairPoll: (token: string) => call<{ status: PairStatus }>('pair', { body: { action: 'poll' }, token }),
     positions: (token: string) => call<Snapshot>('positions', { token }),
+    setLimit: (token: string, limit: number) => call<{ limit: number }>('limits', { body: { limit }, token }),
+    transcribe: (token: string, wav: Uint8Array) =>
+      call<{ text: string; command: { kind: 'set_limit'; amount: number } | { kind: 'out_of_range'; amount: number } | { kind: 'unclear' } }>('transcribe', {
+        raw: { body: wav, contentType: 'audio/wav' },
+        token,
+      }),
     propose: (token: string, kind: ActionKind) =>
       call<ProposalReply & { dismissed?: true }>('act', { body: { action: 'propose', kind }, token }),
     confirm: (token: string, proposalId: string, kind: 'cut_half' | 'cut_all') =>
@@ -105,6 +115,8 @@ export function failText(e: unknown): string {
     case 'consumed': return 'ALREADY DONE'
     case 'too_soon': return 'PRESS AGAIN'
     case 'rate_limited': return 'SLOW DOWN'
+    case 'raise_blocked': return 'USE THE SITE'
+    case 'bad_limit': return 'BAD LIMIT'
     default: return 'FAILED'
   }
 }

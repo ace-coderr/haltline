@@ -342,3 +342,160 @@ test('an unpair (token rejected) resets to boot so pairing restarts', () => {
   assert.equal(s.phase, 'boot')
   assert.equal(s.snapshot, null)
 })
+
+// ------------------------------------------------------------------ voice
+
+import { LIMIT_PRESETS, LISTEN_MS, VOICE_CONFIRM_MS } from './model.ts'
+import { BYTES_PER_SAMPLE, concatChunks, pcmDurationMs, pcmToWav, SAMPLE_RATE } from './wav.ts'
+
+const listening = (s: AppState = ready(snap()), at = T + 1000) => update(s, { type: 'swipe', dir: 'up', at })
+
+test('voice: ANY swipe on an idle screen starts listening and opens the microphone', () => {
+  for (const dir of ['up', 'down'] as const) {
+    const u = update(ready(snap()), { type: 'swipe', dir, at: T + 1000 })
+    assert.deepEqual(u.effects, [{ type: 'listen_start' }])
+    assert.equal(u.state.voice?.phase, 'listening')
+    const sc = buildScreen(u.state, T + 1500)
+    assert.deepEqual([sc.kind, sc.big], ['listening', 'LISTENING'])
+    assert.ok(sc.sub.includes('set limit five hundred'))
+    assert.ok(sc.status.startsWith('PAPER'))
+  }
+})
+
+test('voice: no listening while the menu or a confirm is open, while a notice shows, or while offline', () => {
+  const menu = update(ready(snap()), { type: 'press', at: T + 1000 }).state
+  assert.deepEqual(update(menu, { type: 'swipe', dir: 'up', at: T + 3000 }).effects, [])
+  let off = ready(snap())
+  off = update(off, { type: 'snapshot_failed', problem: 'offline', at: T + 1000 }).state
+  assert.deepEqual(update(off, { type: 'swipe', dir: 'up', at: T + STALE_AFTER_MS + 5000 }).effects, [])
+  const noticed = update(ready(snap()), { type: 'action_failed', text: 'WAIT 5s', at: T + 1000 }).state
+  assert.deepEqual(update(noticed, { type: 'swipe', dir: 'up', at: T + 2000 }).effects, [])
+})
+
+test('voice: pressing or swiping while listening finishes the recording; so does the time limit', () => {
+  for (const ev of [{ type: 'press', at: T + 3000 }, { type: 'swipe', dir: 'down', at: T + 3000 }] as const) {
+    const u = update(listening().state, ev)
+    assert.deepEqual(u.effects, [{ type: 'listen_stop' }])
+    assert.equal(u.state.voice?.phase, 'thinking')
+  }
+  const l = listening().state
+  assert.deepEqual(update(l, { type: 'tick', at: T + 1000 + LISTEN_MS - 1 }).effects, [])
+  assert.deepEqual(update(l, { type: 'tick', at: T + 1000 + LISTEN_MS }).effects, [{ type: 'listen_stop' }])
+})
+
+test('voice: a heard limit goes to a confirm screen, never straight to the server', () => {
+  let s = update(listening().state, { type: 'press', at: T + 3000 }).state
+  const u = update(s, { type: 'voice_heard', amount: 500, heard: 'Set limit 500.', at: T + 4000 })
+  assert.deepEqual(u.effects, [])
+  const sc = buildScreen(u.state, T + 4100)
+  assert.deepEqual([sc.kind, sc.big], ['voice_confirm', 'LIMIT $500'])
+  assert.equal(sc.sub, 'heard: "Set limit 500."')
+  assert.ok(sc.hint.includes('press: confirm'))
+  s = u.state
+  // stray press is ignored, a later press sends exactly one set_limit
+  assert.deepEqual(update(s, { type: 'press', at: T + 4000 + MIN_CONFIRM_MS - 1 }).effects, [])
+  const ok = update(s, { type: 'press', at: T + 4000 + MIN_CONFIRM_MS + INPUT_DEBOUNCE_MS })
+  assert.deepEqual(ok.effects, [{ type: 'set_limit', amount: 500 }])
+  assert.deepEqual([ok.state.voice, ok.state.busy], [null, 'confirming'])
+  assert.deepEqual(update(ok.state, { type: 'press', at: T + 9000 }).effects, [], 'busy blocks a second press')
+})
+
+test('voice: a swipe cancels the spoken limit; it also expires by itself', () => {
+  let s = update(listening().state, { type: 'press', at: T + 3000 }).state
+  s = update(s, { type: 'voice_heard', amount: 500, heard: 'x', at: T + 4000 }).state
+  assert.equal(update(s, { type: 'swipe', dir: 'down', at: T + 6000 }).state.voice, null)
+  const late = update(s, { type: 'press', at: T + 4000 + VOICE_CONFIRM_MS })
+  assert.deepEqual(late.effects, [])
+  assert.equal(late.state.notice?.text, 'EXPIRED')
+  assert.equal(update(s, { type: 'tick', at: T + 4000 + VOICE_CONFIRM_MS }).state.voice, null)
+})
+
+test('voice: results that arrive when we are not waiting for them are ignored', () => {
+  const s = ready(snap())
+  assert.equal(update(s, { type: 'voice_heard', amount: 500, heard: 'x', at: T }).state.voice, null)
+  assert.equal(update(s, { type: 'voice_failed', message: 'X', heard: null, fallback: false }).state.voice, null)
+})
+
+test('voice failure: "didn\'t catch that" offers a retry; unavailable offers the swipe fallback', () => {
+  let s = update(listening().state, { type: 'press', at: T + 3000 }).state
+  s = update(s, { type: 'voice_failed', message: "DIDN'T CATCH THAT", heard: 'the weather is nice', fallback: false }).state
+  const sc = buildScreen(s, T + 4000)
+  assert.deepEqual([sc.kind, sc.big], ['voice_failed', "DIDN'T CATCH THAT"])
+  assert.equal(sc.sub, 'heard: "the weather is nice"')
+  assert.equal(sc.hint, 'press: try again · swipe: back')
+  const retry = update(s, { type: 'press', at: T + 5000 })
+  assert.deepEqual(retry.effects, [{ type: 'listen_start' }])
+  assert.equal(update(s, { type: 'swipe', dir: 'up', at: T + 5000 }).state.voice, null)
+
+  let u = update(listening().state, { type: 'press', at: T + 3000 }).state
+  u = update(u, { type: 'voice_failed', message: 'VOICE UNAVAILABLE', heard: null, fallback: true }).state
+  assert.ok(buildScreen(u, T + 4000).hint.includes('press: set by swipes'))
+})
+
+test('gesture fallback: any swipe cycles the preset values, press chooses, then the usual confirm', () => {
+  let s = update(listening().state, { type: 'press', at: T + 3000 }).state
+  s = update(s, { type: 'voice_failed', message: 'VOICE UNAVAILABLE', heard: null, fallback: true }).state
+  s = update(s, { type: 'press', at: T + 4000 }).state
+  assert.equal(s.voice?.phase, 'stepper')
+  assert.equal(buildScreen(s, T + 4100).big, '$500')
+  const seen: string[] = []
+  ;(['up', 'down', 'up', 'down', 'up'] as const).forEach((dir, i) => {
+    s = update(s, { type: 'swipe', dir, at: T + 5000 + i * 1000 }).state
+    seen.push(buildScreen(s, T + 5000 + i * 1000).big)
+  })
+  assert.deepEqual(seen, ['$1,000', '$2,500', '$100', '$250', '$500'], 'direction never matters and it wraps')
+  s = update(s, { type: 'press', at: T + 11_000 }).state
+  assert.equal(s.voice?.phase, 'confirm')
+  assert.equal(buildScreen(s, T + 11_100).sub, 'chosen with swipes')
+  const go = update(s, { type: 'press', at: T + 11_000 + MIN_CONFIRM_MS + INPUT_DEBOUNCE_MS })
+  assert.deepEqual(go.effects, [{ type: 'set_limit', amount: 500 }])
+  assert.ok(LIMIT_PRESETS.every((p) => p >= 1))
+})
+
+test('voice: with no limit set, a press starts listening', () => {
+  const s = ready(snap({ state: 'NO_LIMIT', limit: null, used: null, left: null, fraction: null }))
+  const u = update(s, { type: 'press', at: T + 1000 })
+  assert.deepEqual(u.effects, [{ type: 'listen_start' }])
+})
+
+test('voice: an automatic TRIPPED menu does not interrupt a recording in progress', () => {
+  let s = listening(ready(snap())).state
+  s = update(s, { type: 'snapshot', snapshot: tripped(), at: T + 2000 }).state
+  assert.equal(s.menu.open, false)
+  assert.equal(s.voice?.phase, 'listening')
+})
+
+test('voice: the long heard text is shortened to fit the line', () => {
+  let s = update(listening().state, { type: 'press', at: T + 3000 }).state
+  s = update(s, { type: 'voice_heard', amount: 500, heard: 'x'.repeat(80), at: T + 4000 }).state
+  const sub = buildScreen(s, T + 4100).sub
+  assert.ok(sub.length <= 48)
+  assert.ok(sub.endsWith('…"'))
+})
+
+// ------------------------------------------------------------------ WAV
+
+test('wav: a correct 16 kHz mono 16-bit header and untouched samples', () => {
+  const pcm = new Uint8Array([1, 0, 2, 0, 3, 0, 4, 0])
+  const wav = pcmToWav(pcm)
+  const v = new DataView(wav.buffer)
+  const tag = (o: number) => String.fromCharCode(wav[o]!, wav[o + 1]!, wav[o + 2]!, wav[o + 3]!)
+  assert.deepEqual([tag(0), tag(8), tag(12), tag(36)], ['RIFF', 'WAVE', 'fmt ', 'data'])
+  assert.equal(v.getUint32(4, true), 36 + 8)
+  assert.deepEqual([v.getUint16(20, true), v.getUint16(22, true), v.getUint32(24, true), v.getUint32(28, true), v.getUint16(32, true), v.getUint16(34, true)], [1, 1, SAMPLE_RATE, SAMPLE_RATE * BYTES_PER_SAMPLE, 2, 16])
+  assert.equal(v.getUint32(40, true), 8)
+  assert.deepEqual([...wav.subarray(44)], [...pcm])
+  assert.equal(wav.byteLength, 52)
+})
+
+test('wav: an odd trailing byte is dropped so samples stay whole', () => {
+  assert.equal(pcmToWav(new Uint8Array(7)).byteLength, 44 + 6)
+  assert.equal(pcmToWav(new Uint8Array(0)).byteLength, 44)
+})
+
+test('wav: chunks join in order and durations are computed from the sample rate', () => {
+  assert.deepEqual([...concatChunks([new Uint8Array([1, 2]), new Uint8Array([3])])], [1, 2, 3])
+  assert.equal(pcmDurationMs(3200), 100)
+  assert.equal(pcmDurationMs(SAMPLE_RATE * BYTES_PER_SAMPLE * 4), 4000)
+  assert.equal(pcmDurationMs(0), 0)
+})
