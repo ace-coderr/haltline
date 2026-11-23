@@ -32,7 +32,7 @@ export async function renderBig(text: string): Promise<{ left: number[]; right: 
   const family = 'system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif'
   let size = 132
   g.font = `bold ${size}px ${family}`
-  const maxW = FULL_W - 28
+  const maxW = FULL_W - 48 // at least 24 px of margin on each side
   const w = g.measureText(text).width
   if (w > maxW) {
     size = Math.max(24, Math.floor((size * maxW) / w))

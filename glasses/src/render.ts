@@ -21,6 +21,12 @@ export interface Frame {
   hint: string
 }
 
+/** Safe margin on the left and right of every text line, in px. */
+const MARGIN = 10
+/** The gauge is 27 cells x 20 px = 540 px wide, centred: 18 px margin each side. */
+const GAUGE_W = 540
+const GAUGE_X = (576 - GAUGE_W) / 2
+
 const nonEmpty = (s: string): string => (s.length > 0 ? s : ' ')
 
 export class Renderer {
@@ -35,9 +41,9 @@ export class Renderer {
   }
 
   async init(first: Frame): Promise<boolean> {
-    const text = (id: number, name: string, y: number, h: number, content: string, capture = 0) =>
+    const text = (id: number, name: string, y: number, h: number, content: string, capture = 0, x = MARGIN, w = 576 - 2 * MARGIN) =>
       new TextContainerProperty({
-        xPosition: 0, yPosition: y, width: 576, height: h, borderWidth: 0, borderColor: 0, paddingLength: 0,
+        xPosition: x, yPosition: y, width: w, height: h, borderWidth: 0, borderColor: 0, paddingLength: 0,
         containerID: id, containerName: name, content: nonEmpty(content), isEventCapture: capture,
       })
     const img = (id: number, name: string, x: number) =>
@@ -47,7 +53,7 @@ export class Renderer {
       containerTotalNum: 6,
       textObject: [
         text(ID.status, NAME.status, 0, 34, first.status),
-        text(ID.gauge, NAME.gauge, 178, 34, first.gauge),
+        text(ID.gauge, NAME.gauge, 178, 34, first.gauge, 0, GAUGE_X, GAUGE_W),
         text(ID.sub, NAME.sub, 212, 38, first.sub),
         text(ID.hint, NAME.hint, 250, 38, first.hint, 1),
       ],

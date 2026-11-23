@@ -6,14 +6,18 @@
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "tagline": "Your daily loss limit, at a glance",
-  "description": "Haltline shows how close you are to your own daily loss limit on your glasses, and lets you cut or dismiss with one confirmed gesture. Paper trading only: a simulated account priced from public market data. Not financial advice. No real funds.",
+  "description": "Haltline shows how close you are to your own daily loss limit on your glasses, and lets you cut or dismiss with one confirmed gesture. Paper trading only: a simulated account priced from public market data. Not financial advice. No real funds. Tested in the official Even Hub simulator; not yet verified on physical glasses (swipe direction mapping and BLE update timing are hardware-unverified).",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "network",
       "desc": "Reads your paper account and sends confirmed paper actions to the Haltline backend.",
-      "whitelist": ["https://zlckjbqocxhwbvhegjlb.supabase.co"]
+      "whitelist": [
+        "https://zlckjbqocxhwbvhegjlb.supabase.co"
+      ]
     }
   ],
-  "supported_languages": ["en"]
+  "supported_languages": [
+    "en"
+  ]
 }

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   type AppEvent, type AppState, buildScreen, formatUsdWhole, gaugeText, initialState, INPUT_DEBOUNCE_MS, MIN_CONFIRM_MS,
-  type Proposal, type Snapshot, STALE_AFTER_MS, update,
+  orderLine, type Proposal, type Snapshot, STALE_AFTER_MS, update,
 } from './model.ts'
 import { emptyGauge, filledCells, GAUGE_CELLS, gaugeString, stepGauge } from './gauge.ts'
 
@@ -35,7 +35,7 @@ const proposal = (shownAt: number): Proposal => ({
 test('gauge: fills, never shows empty once anything is used, full only at the limit', () => {
   assert.equal(filledCells(0), 0)
   assert.equal(filledCells(0.001), 1)
-  assert.equal(filledCells(0.5), GAUGE_CELLS / 2)
+  assert.equal(filledCells(0.5), Math.round(GAUGE_CELLS / 2))
   assert.equal(filledCells(0.999), GAUGE_CELLS - 1)
   assert.equal(filledCells(1), GAUGE_CELLS)
   assert.equal(filledCells(7), GAUGE_CELLS)
@@ -172,20 +172,43 @@ test('no actions can start while offline or without prices', () => {
 
 // ------------------------------------------------------------------ input and the action flow
 
-test('press opens the menu in CALM and CLOSING; swipes cycle cut half, cut all, dismiss', () => {
+test('press opens the menu in CALM and CLOSING; ANY swipe advances through cut half, cut all, dismiss', () => {
   for (const sn of [snap(), closing()]) {
-    let s = ready(sn)
-    s = update(s, { type: 'press', at: T + 1000 }).state
-    assert.deepEqual(s.menu, { open: true, index: 0 })
-    s = update(s, { type: 'swipe', dir: 'down', at: T + 2000 }).state
-    assert.equal(buildScreen(s, T + 2000).sub.includes('■ CUT ALL?'), true)
-    s = update(s, { type: 'swipe', dir: 'down', at: T + 3000 }).state
-    assert.equal(buildScreen(s, T + 3000).sub.includes('■ DISMISS?'), true)
-    s = update(s, { type: 'swipe', dir: 'down', at: T + 4000 }).state
-    assert.equal(s.menu.index, 0, 'wraps around')
-    s = update(s, { type: 'swipe', dir: 'up', at: T + 5000 }).state
-    assert.equal(s.menu.index, 2, 'swipe up goes back')
+    for (const dirs of [['down', 'down', 'down'], ['up', 'up', 'up'], ['up', 'down', 'up']] as const) {
+      let s = ready(sn)
+      s = update(s, { type: 'press', at: T + 1000 }).state
+      assert.deepEqual(s.menu, { open: true, index: 0 })
+      const seen: number[] = []
+      dirs.forEach((dir, i) => {
+        s = update(s, { type: 'swipe', dir, at: T + 2000 + i * 1000 }).state
+        seen.push(s.menu.index)
+      })
+      assert.deepEqual(seen, [1, 2, 0], 'direction does not matter and the cycle wraps')
+    }
   }
+})
+
+test('swipe direction can never select or confirm anything, only move the highlight or cancel', () => {
+  let s = ready(tripped())
+  for (const dir of ['up', 'down'] as const) {
+    const u = update(s, { type: 'swipe', dir, at: T + 5000 })
+    assert.deepEqual(u.effects, [])
+    s = { ...u.state, lastInputAt: -Infinity }
+  }
+})
+
+test('confirm line states the intent: which side, what it reduces', () => {
+  assert.equal(orderLine([{ symbol: 'ETHUSD', side: 'Buy', qty: '1.500' }]), 'BUY 1.500 ETHUSD · reduces short')
+  assert.equal(orderLine([{ symbol: 'ETHUSD', side: 'Sell', qty: '1.000' }]), 'SELL 1.000 ETHUSD · reduces long')
+  assert.equal(
+    orderLine([{ symbol: 'ETHUSD', side: 'Sell', qty: '1.000' }, { symbol: 'BTCUSD', side: 'Buy', qty: '0.1000' }]),
+    'SELL 1.000 ETHUSD · reduces long (+1 more)',
+  )
+  assert.equal(orderLine([]), '')
+  let s = ready(tripped())
+  s = update(s, { type: 'press', at: T + 1000 }).state
+  s = update(s, { type: 'proposal', proposal: proposal(T + 1500) }).state
+  assert.equal(buildScreen(s, T + 1600).sub, 'SELL 1.000 ETHUSD · reduces long')
 })
 
 test('swipes on a closed menu do nothing; bursts of swipes within the debounce count once', () => {

@@ -14,9 +14,17 @@ says so.
 Also handled: not paired (6-digit pairing code), loading, offline (live numbers are replaced,
 never shown stale), prices unavailable, no limit set, no open positions, cooldown, writes off.
 
+## Verification status (read this first)
+
+**Tested in the official Even Hub simulator. Not yet verified on physical glasses.** Hardware-unverified:
+
+- **Swipe direction.** The SDK does not document how `SCROLL_TOP_EVENT` / `SCROLL_BOTTOM_EVENT` map to swipe up / swipe down. The app therefore ignores direction: any swipe advances to the next option, and a swipe on the confirm screen only cancels, so a wrong guess cannot select or confirm anything.
+- **BLE timing.** How fast the images and text updates reach real glasses, and how the pulse and gauge animation look, have not been measured. Updates are coalesced and only changed containers are sent.
+- Font rendering and exact text widths (the simulator's fonts differ from the hardware's), and the microphone PCM format on hardware.
+
 ## Controls
 
-- **Swipe up / down**: cycle cut half / cut all / dismiss.
+- **Swipe (either direction)**: advance through cut half / cut all / dismiss.
 - **Press**: open the action menu; select; confirm.
 - A confirm step always follows (20 s to answer, a press in the first 0.9 s is ignored as a
   stray press), and the server enforces a 60 s cooldown and the kill switch.

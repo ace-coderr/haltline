@@ -138,8 +138,10 @@ export function update(prev: AppState, ev: AppEvent): Update {
       const base = { ...prev, lastInputAt: ev.at }
       if (prev.pending) return noop({ ...base, pending: null, notice: null }) // swipe cancels the confirm step
       if (!prev.menu.open) return noop(base)
-      const step = ev.dir === 'down' ? 1 : -1
-      const index = (prev.menu.index + step + MENU.length) % MENU.length
+      // Direction is deliberately ignored: how the glasses map scroll events to swipe up/down is not
+      // documented and not verified on hardware, so ANY swipe advances to the next option. Every
+      // option is reachable in at most two swipes, and a wrong guess cannot select anything.
+      const index = (prev.menu.index + 1) % MENU.length
       return noop({ ...base, menu: { open: true, index } })
     }
 
@@ -231,6 +233,16 @@ function menuLine(index: number): string {
   return MENU.map((k, i) => (i === index ? `■ ${label(k).toUpperCase()}?` : `□ ${label(k)}`)).join('   ')
 }
 
+/** e.g. "BUY 1.500 ETHUSD · reduces short". A reduce-only Buy closes part of a short; a Sell, a long. */
+export function orderLine(orders: Proposal['orders']): string {
+  const first = orders[0]
+  if (!first) return ''
+  const side = first.side === 'Sell' ? 'SELL' : 'BUY'
+  const reduces = first.side === 'Sell' ? 'long' : 'short'
+  const more = orders.length > 1 ? ` (+${orders.length - 1} more)` : ''
+  return `${side} ${first.qty} ${first.symbol} · reduces ${reduces}${more}`
+}
+
 const stateWord = (s: Snapshot): string => (s.state === 'NO_LIMIT' ? 'NO LIMIT' : s.state === 'CLOSING' ? 'CLOSING IN' : s.state)
 
 export function buildScreen(s: AppState, now: number): Screen {
@@ -274,7 +286,7 @@ export function buildScreen(s: AppState, now: number): Screen {
   const tripped = snap.state === 'TRIPPED'
 
   if (s.pending) {
-    const o = s.pending.orders.map((x) => `${x.side === 'Sell' ? 'SELL' : 'BUY'} ${x.qty} ${x.symbol}`).join(' + ')
+    const o = orderLine(s.pending.orders)
     const secs = Math.max(0, Math.ceil((s.pending.expiresAt - now) / 1000))
     return {
       kind: 'confirm',

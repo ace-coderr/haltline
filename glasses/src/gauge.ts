@@ -1,7 +1,8 @@
 // The gauge line: filled cells (full blocks) then a thin track. Text only, so a redraw
 // costs a few dozen bytes over BLE; no image has to be re-sent while it animates.
 
-export const GAUGE_CELLS = 26;
+/** 27 cells x 20 px = 540 px: centred with an 18 px margin each side on the 576 px display. */
+export const GAUGE_CELLS = 27;
 const FILLED = '█'; // full block, present in the glasses font
 const EMPTY = '━'; // heavy horizontal line, present in the glasses font
 

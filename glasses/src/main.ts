@@ -164,7 +164,23 @@ bridge.onEvenHubEvent((event) => {
 
 // -------------------------------------------------------------------- boot
 
-if (!CONFIGURED) {
+// Development aid only (stripped from production builds): `?preview=offline|prices|loading` renders
+// that screen through the real renderer without touching the backend, to capture non-live screens.
+const preview = import.meta.env.DEV ? new URLSearchParams(location.search).get('preview') : null
+
+if (preview) {
+  const fixtures: Record<string, () => void> = {
+    loading: () => {},
+    offline: () => {
+      state = { ...initialState(), phase: 'ready', problem: { kind: 'offline', since: 0 } }
+    },
+    prices: () => {
+      state = { ...initialState(), phase: 'ready', problem: { kind: 'prices', since: 0 } }
+    },
+  }
+  fixtures[preview]?.()
+  await renderer.init(toFrame(buildScreen(state, Date.now()), Date.now()))
+} else if (!CONFIGURED) {
   const frame = { status: 'PAPER', big: 'NOT CONFIGURED', gauge: '', sub: 'This build has no backend address.', hint: '' }
   await renderer.init(frame)
 } else {
