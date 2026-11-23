@@ -2,10 +2,9 @@
 // Supabase's auth schema and roles, then exercises the atomic helpers and the RLS rules.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { PGlite } from "@electric-sql/pglite";
+import type { PGlite } from "@electric-sql/pglite";
+import { createDb } from "./db.ts";
 
-const MIGRATION = new URL("../migrations/20261123000000_init.sql", import.meta.url);
 const A = "11111111-1111-1111-1111-111111111111";
 const B = "22222222-2222-2222-2222-222222222222";
 const HASH = "a".repeat(64);
@@ -24,20 +23,7 @@ const rows = async <T = Record<string, unknown>>(sql: string, params: unknown[] 
   (await db.query<T>(sql, params)).rows;
 
 before(async () => {
-  db = new PGlite();
-  await db.exec(`
-    create role anon nologin; create role authenticated nologin; create role service_role nologin;
-    create schema auth;
-    create table auth.users (id uuid primary key);
-    create function auth.uid() returns uuid language sql stable
-      as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
-    grant usage on schema public, auth to anon, authenticated, service_role;
-    grant execute on function auth.uid() to anon, authenticated, service_role;
-    -- mimic Supabase defaults: new public tables are granted to the API roles
-    alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
-    insert into auth.users values ('${A}'), ('${B}');
-  `);
-  await db.exec(readFileSync(MIGRATION, "utf8"));
+  db = await createDb();
 });
 after(async () => {
   await db.close();
@@ -49,7 +35,7 @@ test("migration applies and creates all tables", async () => {
   );
   assert.deepEqual(
     t.map((r) => r.tablename),
-    ["actions_log", "devices", "limits", "pairing_codes", "proposals", "sessions"],
+    ["actions_log", "devices", "limits", "pairing_attempts", "pairing_codes", "proposals", "sessions"],
   );
 });
 

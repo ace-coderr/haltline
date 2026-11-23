@@ -7,7 +7,8 @@ Deadline: 29 Nov 2026, 20:59 (UTC+1). Feature freeze 27 Nov. Audit + video 28 No
   - [x] Pure logic + tests: limit/state maths, cooldown + confirm, reduce-only planner, testnet-only guard
   - [x] Schema migration + RLS + atomic cooldown/confirm helpers (verified in pglite)
   - [ ] Accounts from user: Supabase project, Groq key, Bybit testnet keys (no withdrawal)
-  - [ ] Edge Functions: health, limits, positions, act, pair, transcribe
+  - [x] Edge Functions written + tested with fakes: health, limits, positions, act, pair, transcribe (not yet deployed)
+  - [x] Bybit client, Groq client, voice parser, pairing brute-force protection (migration 2)
   - [ ] Live testnet read + reduce-only order verified
 - [ ] 3. Glasses app: three screens, swipe/press actions
 - [ ] 4. Pairing + settings (web)

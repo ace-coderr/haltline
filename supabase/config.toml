@@ -1,0 +1,21 @@
+# Minimal Supabase config. The functions authenticate callers themselves (device token or
+# Supabase session JWT), and the glasses send no JWT at all, so the gateway JWT check is off.
+project_id = "haltline"
+
+[functions.health]
+verify_jwt = false
+
+[functions.pair]
+verify_jwt = false
+
+[functions.limits]
+verify_jwt = false
+
+[functions.positions]
+verify_jwt = false
+
+[functions.act]
+verify_jwt = false
+
+[functions.transcribe]
+verify_jwt = false

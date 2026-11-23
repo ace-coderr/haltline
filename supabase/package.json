@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "test": "node --test \"functions/**/*.test.ts\" \"tests/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && deno check functions/*/index.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.3.0",
+    "@supabase/supabase-js": "^2.119.2",
     "@types/node": "^24.0.0",
+    "deno": "^2.9.6",
     "typescript": "^5.7.0"
   }
 }
