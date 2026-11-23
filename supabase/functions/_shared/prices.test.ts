@@ -98,3 +98,32 @@ test("time passing makes a cached quote stale without any fetch succeeding", asy
   t.advance(10_000);
   await assert.rejects(t.feed.getQuotes(["BTCUSD"]), (e: unknown) => e instanceof ExchangeError && e.kind === "prices_stale");
 });
+
+test("audit: a wildly wide spread is rejected as a broken book", () => {
+  assert.throws(() => parseBitstampTicker("BTCUSD", { timestamp: String(NOW / 1000), last: "100", bid: "90", ask: "100" }, NOW), (e: unknown) => e instanceof ExchangeError);
+  assert.doesNotThrow(() => parseBitstampTicker("BTCUSD", { timestamp: String(NOW / 1000), last: "100", bid: "99", ask: "101" }, NOW));
+});
+
+test("audit: a quote that jumps more than 25% from a recent one is held back; the old quote then goes stale (fail closed)", async () => {
+  const t = setup([quote("BTCUSD", NOW - 5000)]);
+  // the source suddenly reports a price 10x higher
+  const bogus = (async () => new Response(JSON.stringify({ timestamp: String(Math.floor(NOW / 1000)), last: "1000", bid: "999.9", ask: "1000.1" }), { status: 200 })) as unknown as typeof fetch;
+  const feed = createPriceFeed({ store: { readQuotes: async () => [...t.db.values()], writeQuotes: async (q) => { for (const x of q) t.db.set(x.symbol, x) } }, fetchFn: bogus, now: () => NOW });
+  // cached 100 (5 s old): refresh is attempted, the bogus 1000 is refused, the recent cache still serves
+  assert.equal((await feed.getQuotes(["BTCUSD"])).get("BTCUSD")!.last, 100);
+  assert.equal(t.db.get("BTCUSD")!.last, 100, "the bogus quote was never stored");
+  // once the cached quote is too old to use, there is no price at all
+  const aged = createPriceFeed({ store: { readQuotes: async () => [quote("BTCUSD", NOW - 20_000)], writeQuotes: async () => {} }, fetchFn: bogus, now: () => NOW });
+  await assert.rejects(aged.getQuotes(["BTCUSD"]), (e: unknown) => e instanceof ExchangeError);
+});
+
+test("audit: a normal move is accepted and a jump against an old cached quote (over 5 minutes) is accepted", async () => {
+  const move = (async () => new Response(JSON.stringify({ timestamp: String(Math.floor(NOW / 1000)), last: "110", bid: "109.9", ask: "110.1" }), { status: 200 })) as unknown as typeof fetch;
+  const db = new Map<string, Quote>([["BTCUSD", quote("BTCUSD", NOW - 6000)]]);
+  const f = createPriceFeed({ store: { readQuotes: async () => [...db.values()], writeQuotes: async (q) => { for (const x of q) db.set(x.symbol, x) } }, fetchFn: move, now: () => NOW });
+  assert.equal((await f.getQuotes(["BTCUSD"])).get("BTCUSD")!.last, 110);
+  const far = (async () => new Response(JSON.stringify({ timestamp: String(Math.floor(NOW / 1000)), last: "500", bid: "499.9", ask: "500.1" }), { status: 200 })) as unknown as typeof fetch;
+  const db2 = new Map<string, Quote>([["BTCUSD", quote("BTCUSD", NOW - 10 * 60_000)]]);
+  const f2 = createPriceFeed({ store: { readQuotes: async () => [...db2.values()], writeQuotes: async (q) => { for (const x of q) db2.set(x.symbol, x) } }, fetchFn: far, now: () => NOW });
+  assert.equal((await f2.getQuotes(["BTCUSD"])).get("BTCUSD")!.last, 500);
+});

@@ -46,10 +46,18 @@ export function parseBitstampTicker(symbol: string, body: unknown, nowMs: number
     throw new ExchangeError("prices_unavailable", "price source returned an unexpected shape");
   }
   if (ask < bid) throw new ExchangeError("prices_unavailable", "price source returned a crossed book");
+  if (ask / bid - 1 > MAX_SPREAD) throw new ExchangeError("prices_unavailable", "price source returned an implausibly wide spread");
   const sourceTs = ts * 1000;
   if (nowMs - sourceTs > MAX_SOURCE_LAG_MS) throw new ExchangeError("prices_stale", "price source timestamp is too old");
   return { symbol, bid, ask, last, sourceTs, fetchedAt: nowMs };
 }
+
+/** A spread wider than this is treated as a broken book, not a price. */
+export const MAX_SPREAD = 0.05;
+/** A quote that jumps by more than this from a still-recent cached quote is held back as suspect. */
+export const MAX_JUMP = 0.25;
+/** The jump guard only compares against cached quotes younger than this. */
+export const JUMP_WINDOW_MS = 5 * 60_000;
 
 export const quoteAge = (q: Quote, nowMs: number): number => Math.max(0, nowMs - q.fetchedAt);
 export const isUsable = (q: Quote, nowMs: number): boolean => quoteAge(q, nowMs) <= MAX_QUOTE_AGE_MS;
@@ -83,6 +91,12 @@ export function createPriceFeed(deps: PriceFeedDeps) {
     return parseBitstampTicker(symbol, json, deps.now());
   }
 
+  /** Rejects a quote that leaps away from a recent one: a bogus feed must not trip limits or fill orders. */
+  function plausible(fresh: Quote, previous: Quote | undefined): boolean {
+    if (!previous || fresh.fetchedAt - previous.fetchedAt > JUMP_WINDOW_MS) return true;
+    return Math.abs(fresh.last / previous.last - 1) <= MAX_JUMP;
+  }
+
   /**
    * Returns usable quotes for the requested symbols (all supported symbols by default).
    * Throws ExchangeError if any requested symbol has no usable quote.
@@ -101,9 +115,11 @@ export function createPriceFeed(deps: PriceFeedDeps) {
       const results = await Promise.allSettled(toFetch.map((i) => fetchOne(i.symbol, i.sourcePair)));
       const fresh: Quote[] = [];
       results.forEach((r) => {
-        if (r.status === "fulfilled") {
+        if (r.status === "fulfilled" && plausible(r.value, cached.get(r.value.symbol))) {
           fresh.push(r.value);
           cached.set(r.value.symbol, r.value);
+        } else if (r.status === "fulfilled") {
+          lastFailure = new ExchangeError("prices_unavailable", "price source returned a suspicious jump");
         } else {
           lastFailure = r.reason;
         }

@@ -65,7 +65,12 @@ export function route(methods: readonly string[], fn: (req: Request) => Promise<
 /** Reads at most `max` bytes of the body, rejecting with 413 beyond that. */
 export async function readBytesLimited(req: Request, max: number): Promise<Uint8Array> {
   const declared = Number(req.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > max) throw new ApiError(413, "body_too_large", "Request body is too large.");
+  if (Number.isFinite(declared) && declared > max) {
+    // Answering before the client has finished uploading makes some proxies return 503 instead of
+    // our 413. Drain a bounded amount (never more than 3x the limit) so the client gets a clean answer.
+    await drain(req, max * 3);
+    throw new ApiError(413, "body_too_large", "Request body is too large.");
+  }
   if (!req.body) return new Uint8Array(0);
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -75,7 +80,7 @@ export async function readBytesLimited(req: Request, max: number): Promise<Uint8
     if (done) break;
     total += value.byteLength;
     if (total > max) {
-      await reader.cancel();
+      await drain(req, max * 3 - total, reader);
       throw new ApiError(413, "body_too_large", "Request body is too large.");
     }
     chunks.push(value);
@@ -168,4 +173,21 @@ export class WindowLimiter {
     h.count += 1;
     return 0;
   }
+}
+
+/** Reads and discards up to `limit` more bytes of the body, then stops. */
+async function drain(req: Request, limit: number, existing?: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  const reader = existing ?? req.body?.getReader();
+  if (!reader) return;
+  let seen = 0;
+  try {
+    while (seen < limit) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      seen += value.byteLength;
+    }
+  } catch {
+    /* connection closed by the client: fine */
+  }
+  await reader.cancel().catch(() => {});
 }

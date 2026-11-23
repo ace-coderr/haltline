@@ -46,7 +46,7 @@ export interface Store {
   consumeProposal(id: string, userId: string, kind: string, minDelayMs: number): Promise<{ ok: boolean; reason: string | null; orders?: PlannedOrder[] }>;
   logAction(row: ActionLogRow): Promise<void>;
   upsertSession(userId: string, day: string, limitAtStart: number, tripped: boolean): Promise<void>;
-  startPairing(code: string, tokenHash: string, ttlSeconds: number, maxPending: number): Promise<{ ok: boolean; reason: "collision" | "busy" | null }>;
+  startPairing(code: string, tokenHash: string, ttlSeconds: number, maxPending: number, ipHash: string | null): Promise<{ ok: boolean; reason: "collision" | "busy" | "ip_limited" | null }>;
   claimPairing(userId: string, code: string): Promise<{ ok: boolean; reason: "invalid_code" | "rate_limited" | null }>;
   revokeDevice(userId: string, deviceId: string): Promise<boolean>;
   redeemPairing(tokenHash: string): Promise<{ status: "unknown" | "expired" | "pending" | "paired"; expires_at?: string; device_id?: string }>;
@@ -208,6 +208,21 @@ export interface ProposalView {
 }
 
 export async function propose(ctx: Ctx, caller: Caller, kindRaw: unknown): Promise<ProposalView | { dismissed: true }> {
+  try {
+    return await proposeInner(ctx, caller, kindRaw);
+  } catch (e) {
+    // Every refusal at the propose step (kill switch, cooldown, no positions, no prices) is written to
+    // the actions log too, so the record shows attempts, not only executions. Malformed input (400) is not logged.
+    if (e instanceof ApiError && e.status !== 400 && isActionKind(kindRaw) && kindRaw !== "dismiss") {
+      await ctx.store.logAction({
+        user_id: caller.userId, device_id: caller.deviceId, kind: kindRaw, status: "rejected", reason: e.code, detail: { stage: "propose", via: caller.via },
+      }).catch(() => {});
+    }
+    throw e;
+  }
+}
+
+async function proposeInner(ctx: Ctx, caller: Caller, kindRaw: unknown): Promise<ProposalView | { dismissed: true }> {
   if (!isActionKind(kindRaw)) throw new ApiError(400, "bad_kind", "Unknown action.");
   const kind = kindRaw;
 
@@ -363,13 +378,15 @@ export function randomToken(): string {
 export async function pairStart(
   store: Store,
   hash: (t: string) => Promise<string>,
+  ipHash: string | null = null,
 ): Promise<{ code: string; token: string; expiresInSeconds: number }> {
   const token = randomToken();
   const tokenHash = await hash(token);
   for (let i = 0; i < 5; i++) {
     const code = randomCode();
-    const r = await store.startPairing(code, tokenHash, PAIRING_TTL_SECONDS, PAIRING_MAX_PENDING);
+    const r = await store.startPairing(code, tokenHash, PAIRING_TTL_SECONDS, PAIRING_MAX_PENDING, ipHash);
     if (r.ok) return { code, token, expiresInSeconds: PAIRING_TTL_SECONDS };
+    if (r.reason === "ip_limited") throw new ApiError(429, "rate_limited", "Too many pairing codes requested from your network. Try again later.");
     if (r.reason === "busy") throw new ApiError(503, "pairing_busy", "Pairing is busy. Try again in a minute.");
   }
   throw new ApiError(503, "pairing_busy", "Could not allocate a pairing code. Try again.");

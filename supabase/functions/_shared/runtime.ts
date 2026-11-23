@@ -76,8 +76,8 @@ const store: Store = {
       check(await db().from("sessions").update({ tripped_at: new Date().toISOString() }).eq("user_id", userId).eq("day", day).is("tripped_at", null));
     }
   },
-  async startPairing(code, tokenHash, ttl, maxPending) {
-    return check(await db().rpc("start_pairing", { p_code: code, p_token_hash: tokenHash, p_ttl_seconds: ttl, p_max_pending: maxPending }));
+  async startPairing(code, tokenHash, ttl, maxPending, ipHash) {
+    return check(await db().rpc("start_pairing", { p_code: code, p_token_hash: tokenHash, p_ttl_seconds: ttl, p_max_pending: maxPending, p_ip_hash: ipHash }));
   },
   async claimPairing(userId, code) {
     return check(await db().rpc("claim_pairing_code", { p_user: userId, p_code: code }));

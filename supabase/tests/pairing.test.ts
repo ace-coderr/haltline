@@ -107,3 +107,27 @@ test("pairing helpers are not callable by API roles", async () => {
     }
   }
 });
+
+test("audit: pairing start is limited per client address hash (10 per hour), other addresses unaffected", async () => {
+  const ipA = "a".repeat(64);
+  const ipB = "b".repeat(64);
+  const startIp = (code: string, ip: string | null) => fn("start_pairing($1,$2,$3,$4,$5,10,3600)", [code, String(code).padEnd(64, "0"), 600, 200, ip]);
+  for (let i = 0; i < 10; i++) assert.equal((await startIp(String(100000 + i), ipA)).ok, true, `start ${i}`);
+  assert.deepEqual(await startIp("200000", ipA), { ok: false, reason: "ip_limited" });
+  assert.equal((await startIp("200001", ipB)).ok, true);
+  assert.equal((await startIp("200002", null)).ok, true, "no address means no per-address limit");
+  // the window slides: old starts stop counting
+  await db.query("update pairing_starts set at = now() - interval '2 hours' where ip_hash = $1", [ipA]);
+  assert.equal((await startIp("200003", ipA)).ok, true);
+});
+
+test("audit: pairing_starts is not readable by API roles", async () => {
+  for (const role of ["anon", "authenticated"]) {
+    await db.exec(`set role ${role}`);
+    try {
+      await assert.rejects(db.query("select * from pairing_starts"), Error, role);
+    } finally {
+      await db.exec("reset role");
+    }
+  }
+});

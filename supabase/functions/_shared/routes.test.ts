@@ -28,6 +28,7 @@ interface World {
   dbDown: boolean;
   panelCalls: Record<string, unknown>[];
   panelError: Error | null;
+  startsByIp: Map<string, number>;
 }
 
 function newWorld(): World {
@@ -35,7 +36,7 @@ function newWorld(): World {
     clock: Date.UTC(2026, 10, 23, 12, 0, 0),
     limits: { daily_limit: 500, kill_switch: false, last_action_at: null },
     logs: [], proposals: new Map(), pairing: new Map(), devices: new Map(), sessions: [],
-    claimResult: "real", positions: [], realized: 0, placed: [], placeError: null, exchangeError: null, dbDown: false, panelCalls: [], panelError: null,
+    claimResult: "real", positions: [], realized: 0, placed: [], placeError: null, exchangeError: null, dbDown: false, panelCalls: [], panelError: null, startsByIp: new Map(),
   };
 }
 
@@ -74,7 +75,9 @@ function build(w: World, extra: Partial<Deps> = {}) {
     },
     async logAction(row) { w.logs.push(row); },
     async upsertSession(_u, day, _l, tripped) { w.sessions.push(`${day}:${tripped}`); },
-    async startPairing(code, hash, ttl) {
+    async startPairing(code, hash, ttl, _max, ipHash) {
+      if (ipHash && (w.startsByIp.get(ipHash) ?? 0) >= 10) return { ok: false, reason: "ip_limited" };
+      if (ipHash) w.startsByIp.set(ipHash, (w.startsByIp.get(ipHash) ?? 0) + 1);
       if (w.pairing.has(code)) return { ok: false, reason: "collision" };
       w.pairing.set(code, { code, hash, user: null, expires: w.clock + ttl * 1000 });
       return { ok: true, reason: null };
@@ -748,4 +751,66 @@ test("limits: the first limit can be set from the glasses with no state check", 
   w.limits.daily_limit = null;
   w.exchangeError = new ExchangeError("prices_unavailable", "down");
   assert.equal((await call(build(w).limits, req("POST", { limit: 300 }, device))).status, 200);
+});
+
+// ---------------------------------------------------------------- audit fixes
+
+test("audit: refusals at the PROPOSE step are written to the actions log, malformed input is not", async () => {
+  const w = newWorld();
+  const h = build(w);
+  // no positions
+  await propose(h, "cut_half");
+  // kill switch
+  w.positions = [long(0.5, -10)];
+  w.limits.kill_switch = true;
+  await propose(h, "cut_all");
+  w.limits.kill_switch = false;
+  // cooldown
+  w.limits.last_action_at = new Date(w.clock - 5_000).toISOString();
+  await propose(h, "cut_half");
+  // malformed
+  await propose(h, "cut_everything");
+  const rejected = w.logs.filter((l) => l.status === "rejected");
+  assert.deepEqual(rejected.map((l) => [l.kind, l.reason]), [["cut_half", "no_positions"], ["cut_all", "kill_switch"], ["cut_half", "cooldown"]]);
+  assert.ok(rejected.every((l) => (l.detail as { stage?: string }).stage === "propose"));
+  // a price outage is logged too
+  w.limits.last_action_at = null;
+  w.exchangeError = new ExchangeError("prices_stale", "old");
+  await propose(h, "cut_half");
+  assert.equal(w.logs.at(-1)!.reason, "prices_stale");
+});
+
+test("audit: per-user rate limits on act, limit writes and reads", async () => {
+  const w = newWorld();
+  w.positions = [long(0.5, -10)];
+  const h = build(w);
+  let last = 0;
+  for (let i = 0; i < 32; i++) last = (await call(h.act, req("POST", { action: "propose", kind: "dismiss" }, device))).status;
+  assert.equal(last, 429);
+  last = 0;
+  for (let i = 0; i < 32; i++) last = (await call(h.limits, req("POST", { limit: 400 + i }, device))).status;
+  assert.equal(last, 429);
+  last = 0;
+  for (let i = 0; i < 125; i++) last = (await call(h.positions, req("GET", undefined, device))).status;
+  assert.equal(last, 429);
+});
+
+test("audit: an oversized body gets a clean 413 even when the client keeps uploading", async () => {
+  const h = build(newWorld());
+  const huge = new Uint8Array(3_100_000);
+  const r = await h.transcribe(new Request("http://localhost/fn", { method: "POST", headers: { ...device, "content-type": "audio/wav" }, body: huge }));
+  assert.equal(r.status, 413);
+});
+
+test("audit: pairing start is limited per client address, not only globally", async () => {
+  const w = newWorld();
+  const h = build(w);
+  const ip = { "cf-connecting-ip": "203.0.113.7" };
+  const other = { "cf-connecting-ip": "198.51.100.9" };
+  const statuses: number[] = [];
+  for (let i = 0; i < 12; i++) statuses.push((await call(h.pair, req("POST", { action: "start" }, ip))).status);
+  assert.deepEqual(statuses.slice(0, 10).every((s) => s === 200), true);
+  assert.deepEqual(statuses.slice(10), [429, 429]);
+  // a different address is unaffected, and so is a request with no address at all
+  assert.equal((await call(h.pair, req("POST", { action: "start" }, other))).status, 200);
 });

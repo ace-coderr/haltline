@@ -46,6 +46,14 @@ export function makeHandlers(deps: Deps) {
   const pairStartLimiter = new WindowLimiter(20, 60_000);
   const pricesLimiter = new WindowLimiter(120, 60_000);
   const paperLimiter = new WindowLimiter(30, 60_000);
+  // Per-user ceilings (per isolate) so one account cannot hammer the database or bloat the actions log.
+  const actLimiter = new WindowLimiter(30, 60_000);
+  const limitsWriteLimiter = new WindowLimiter(30, 60_000);
+  const readLimiter = new WindowLimiter(120, 60_000);
+  const throttle = (l: WindowLimiter, key: string) => {
+    const wait = l.check(key, deps.now());
+    if (wait > 0) throw new ApiError(429, "rate_limited", "Too many requests. Slow down.", { retryAfterMs: wait });
+  };
   const authed = (req: Request) => authenticate(req, deps);
 
   return {
@@ -84,7 +92,7 @@ export function makeHandlers(deps: Deps) {
         case "start": {
           const wait = pairStartLimiter.check("global", deps.now());
           if (wait > 0) throw new ApiError(429, "rate_limited", "Too many pairing requests.", { retryAfterMs: wait });
-          const r = await pairStart(deps.store, sha256Hex);
+          const r = await pairStart(deps.store, sha256Hex, await clientIpHash(req));
           return jsonResponse({ ok: true, ...r });
         }
         case "poll": {
@@ -112,6 +120,7 @@ export function makeHandlers(deps: Deps) {
         const l = await deps.store.getLimits(caller.userId);
         return jsonResponse({ ok: true, limit: l.daily_limit === null ? null : Number(l.daily_limit), killSwitch: l.kill_switch });
       }
+      throttle(limitsWriteLimiter, caller.userId);
       const body = await readJsonObject(req);
       if ("limit" in body) return jsonResponse({ ok: true, ...(await setLimit(deps, caller, body.limit)) });
       if ("killSwitch" in body) return jsonResponse({ ok: true, ...(await setKillSwitch(deps, caller, body.killSwitch)) });
@@ -120,11 +129,13 @@ export function makeHandlers(deps: Deps) {
 
     positions: route(["GET"], async (req) => {
       const caller = await authed(req);
+      throttle(readLimiter, caller.userId);
       return jsonResponse({ ok: true, ...(await getSnapshot(deps, caller)) });
     }),
 
     act: route(["POST"], async (req) => {
       const caller = await authed(req);
+      throttle(actLimiter, caller.userId);
       const body = await readJsonObject(req);
       if (body.action === "propose") {
         return jsonResponse({ ok: true, ...(await propose(deps, caller, body.kind)) });
@@ -160,6 +171,7 @@ export function makeHandlers(deps: Deps) {
     paper: route(["GET", "POST"], async (req) => {
       const caller = await authed(req);
       if (req.method === "GET") {
+        throttle(readLimiter, caller.userId);
         try {
           return jsonResponse({ ok: true, ...(await deps.paper.accountView(caller.userId, utcDayStart(deps.now()))) });
         } catch (e) {
@@ -221,4 +233,10 @@ export function makeHandlers(deps: Deps) {
       }
     }),
   };
+}
+
+/** SHA-256 of the client address as seen by the edge, or null when it cannot be determined. */
+export async function clientIpHash(req: Request): Promise<string | null> {
+  const ip = (req.headers.get("cf-connecting-ip") ?? req.headers.get("x-forwarded-for") ?? "").split(",")[0]!.trim();
+  return ip && ip.length <= 64 ? await sha256Hex(ip) : null;
 }
