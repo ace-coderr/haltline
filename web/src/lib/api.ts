@@ -93,7 +93,18 @@ export interface PaperView {
   model: { feeRate: number; slippageBps: number; maxLeverage: number; startingBalance: number; priceSource: string; fills: string; quoteCurrency: string }
 }
 
+export interface Health {
+  mode: 'PAPER'
+  ok: boolean
+  time: string
+  region: string | null
+  db: 'ok' | 'error'
+  priceSource: { name: string; status: string; ageMs: number | null }
+  voice: 'configured' | 'not_configured'
+}
+
 export const api = {
+  health: () => callFn<Health>('health', { auth: false }),
   snapshot: () => callFn<Snapshot>('positions'),
   paper: () => callFn<PaperView>('paper'),
   prices: () => callFn<{ source: string; quotes: PriceRow[] }>('prices', { auth: false }),

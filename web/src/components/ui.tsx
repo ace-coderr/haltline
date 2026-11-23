@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import { useReveal } from '../lib/hooks.ts'
 import type { RiskState } from '../lib/api.ts'
@@ -36,7 +37,14 @@ export function Section({ id, title, kicker, children, className = '' }: { id?: 
   )
 }
 
+export function useTitle(title: string): void {
+  useEffect(() => {
+    document.title = title
+  }, [title])
+}
+
 export function PageHead({ title, lead, children }: { title: string; lead: string; children?: ReactNode }) {
+  useTitle(`${title} · Haltline`)
   return (
     <header className="page-head wrap">
       <div className="page-head-row">
