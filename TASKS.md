@@ -14,5 +14,5 @@ Deadline: 29 Nov 2026, 20:59 (UTC+1). Feature freeze 27 Nov. Audit + video 28 No
 - [x] 5. Voice (Groq Whisper): live transcribe verified with synthesized speech; mic path verified in simulator (failure path); spoken success path and hardware mic untested
 - [x] 6. Website: Home, How it works, Limits, Positions, Activity, Safety, Pair, Docs (live data; browser-checked desktop + mobile; no broken images or console errors)
 - [x] 7. Deploy: site on GitHub Pages and backend functions deploy automatically via Actions (first runs green, live site checked); keep-alive cron verified by manual run; glasses .ehpk built as an artifact
-- [ ] 8. Audit (find holes, fix them) -> AUDIT.md
-- [ ] 9. README + FEATURE_REQUESTS.md + submission pack
+- [x] 8. Audit: hostile live suite 118/121 -> 124/124, 13 findings fixed, see AUDIT.md
+- [x] 9. README, FEATURE_REQUESTS.md, AUDIT.md, SUBMISSION.md (DoraHacks text); demo video still to record
