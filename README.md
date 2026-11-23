@@ -133,3 +133,7 @@ cd web      && npm test && npx tsc -b
 - The kill switch stops cuts; it does not block changing the limit (by design: the limit is a setting, not an order).
 
 Requests for the Even Hub SDK and platform, based on gaps hit while building this, are in [FEATURE_REQUESTS.md](FEATURE_REQUESTS.md).
+
+## License
+
+[MIT](LICENSE), copyright Haltline contributors.
